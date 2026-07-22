@@ -114,6 +114,7 @@ td.avatar .noimg {
 
 a.name { color: #0866ff; text-decoration: none; font-weight: 600; }
 a.name:hover { text-decoration: underline; }
+a.name.fallback { color: #8a6d00; font-style: italic; font-weight: 500; }
 
 .score { font-weight: 700; }
 .score.zero { color: #dc3545; }

@@ -54,10 +54,22 @@ function visibleRows() {
   const hideRemoved = $("fltHideRemoved").checked;
   const sortBy = $("sortBy").value;
 
+  // Fallback label for friends whose stored name was scrubbed (e.g. the old
+  // "1 mutual friend" mis-reads): show their profile slug until a re-scan
+  // recaptures the real name.
+  const slugOf = (f) => {
+    const m = (f.url || "").match(/profile\.php\?id=(\d+)/);
+    if (m) return "profile " + m[1];
+    const seg = (f.url || "").split("/").filter(Boolean).pop();
+    return seg || f.key;
+  };
+
   let rows = Object.values(friends).map((f) => {
     const a = agg[f.key];
     return {
       ...f,
+      name: f.name || slugOf(f),
+      nameIsFallback: !f.name,
       reactions: a ? a.reactions : 0,
       comments: a ? a.comments : 0,
       score: scoreOf(a),
@@ -143,10 +155,11 @@ function render() {
 
     const tdName = document.createElement("td");
     const a = document.createElement("a");
-    a.className = "name";
+    a.className = "name" + (r.nameIsFallback ? " fallback" : "");
     a.href = r.url;
     a.target = "_blank";
     a.textContent = r.name;
+    if (r.nameIsFallback) a.title = "Name not captured yet — re-run “Scan friends” to fill it in";
     tdName.appendChild(a);
 
     const tdR = document.createElement("td");

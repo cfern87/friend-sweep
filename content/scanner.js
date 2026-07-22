@@ -113,6 +113,18 @@
 
   // ------------------------------------------------------------- friend scan
 
+  // Anchor texts that point at a profile but are NOT the person's name:
+  // the "N mutual friends" link, follower counts, action buttons, etc.
+  const NAME_NOISE_RE =
+    /^(\d[\d,.]*\s+mutual friends?|\d[\d,.]*\s+(followers?|friends|following)|mutual friends?|follow|following|add friend|message|friends|unfriend|see all|view profile)$/i;
+
+  function isValidName(t) {
+    return (
+      !!t && t.length > 1 && t.length < 60 && !NAME_NOISE_RE.test(t.trim()) &&
+      !/^\d[\d,.]*$/.test(t.trim()) // bare numbers are never names
+    );
+  }
+
   function extractFriends(selfUrl) {
     const root = document.querySelector('[role="main"]') || document.body;
     const byKey = new Map();
@@ -124,16 +136,13 @@
       const img = a.querySelector("img");
       if (img) {
         if (!entry.photo) entry.photo = img.src || "";
-        if (!entry.name && img.alt && img.alt.length < 80) entry.name = img.alt.trim();
+        const alt = (img.alt || "").trim();
+        if (!entry.name && isValidName(alt)) entry.name = alt;
       }
+      // The name anchor is short plain text; the first valid candidate wins
+      // (avatar alt is checked above, name link next, noise links rejected).
       const text = visibleText(a);
-      // The name anchor is short plain text; skip anchors that are whole cards.
-      if (text && text.length > 1 && text.length < 60 && !entry.name) {
-        entry.name = text;
-      } else if (text && text.length < 60 && entry.name && text.length > entry.name.length) {
-        // prefer the longer of two short candidates (initials vs full name)
-        entry.name = text;
-      }
+      if (!entry.name && isValidName(text)) entry.name = text;
       byKey.set(prof.key, entry);
     }
     // Drop obvious non-friend links that slipped through (no name at all).

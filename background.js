@@ -5,6 +5,36 @@
 
 const FB = "https://www.facebook.com";
 
+// Texts that earlier versions could mistakenly capture as a person's name
+// (the "N mutual friends" link on friend cards, action buttons, counts).
+// Kept in sync with NAME_NOISE_RE in content/scanner.js.
+const NAME_NOISE_RE =
+  /^(\d[\d,.]*\s+mutual friends?|\d[\d,.]*\s+(followers?|friends|following)|mutual friends?|follow|following|add friend|message|friends|unfriend|see all|view profile|\d[\d,.]*)$/i;
+
+function cleanName(name) {
+  const t = (name || "").trim();
+  return NAME_NOISE_RE.test(t) ? "" : t;
+}
+
+// One-time scrub of records logged with a noise "name" by earlier versions.
+// The real name is refilled by the next friend scan.
+async function scrubNoiseNames() {
+  const { friends } = await chrome.storage.local.get("friends");
+  if (!friends) return;
+  let changed = false;
+  for (const f of Object.values(friends)) {
+    const cleaned = cleanName(f.name);
+    if (cleaned !== f.name) {
+      f.name = cleaned;
+      changed = true;
+    }
+  }
+  if (changed) await chrome.storage.local.set({ friends });
+}
+
+chrome.runtime.onInstalled.addListener(scrubNoiseNames);
+chrome.runtime.onStartup.addListener(scrubNoiseNames);
+
 // ---------------------------------------------------------------- storage
 
 async function getStore(keys) {
@@ -196,7 +226,7 @@ async function handleFriendScanResult(msg) {
     friends[f.key] = {
       ...prev,
       key: f.key,
-      name: f.name || (prev && prev.name) || "",
+      name: cleanName(f.name) || cleanName(prev && prev.name) || "",
       url: f.url,
       photo: f.photo || (prev && prev.photo) || "",
       firstSeen: (prev && prev.firstSeen) || now,
@@ -255,7 +285,7 @@ async function handleFriendDatesResult(msg) {
     if (!friends[key]) {
       friends[key] = {
         key,
-        name: e.name || "",
+        name: cleanName(e.name),
         url: e.url || "",
         photo: "",
         firstSeen: now,
