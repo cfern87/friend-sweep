@@ -14,7 +14,13 @@
   "content_scripts": [
     {
       "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
-      "js": ["content/scanner.js"],
+      "js": ["content/fb-interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
+      "js": ["content/graph.js", "content/scanner.js"],
       "css": ["content/scanner.css"],
       "run_at": "document_idle"
     }

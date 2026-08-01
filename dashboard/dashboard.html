@@ -30,6 +30,8 @@
     </div>
     <div class="group">
       <button id="btnRemove" class="danger" disabled>Remove selected (0)</button>
+      <button id="btnProtect" class="protect-btn" disabled>Protect selected (0)</button>
+      <button id="btnUnprotect" class="unprotect-btn" disabled>Unprotect selected (0)</button>
       <button id="btnCancel" class="ghost">Cancel job</button>
       <button id="btnExport" class="ghost">Export CSV</button>
     </div>
@@ -41,6 +43,7 @@
     <input type="search" id="search" placeholder="Search name…" />
     <label><input type="checkbox" id="fltNoEngagement" /> No engagement only</label>
     <label><input type="checkbox" id="fltHideRemoved" checked /> Hide removed</label>
+    <label><input type="checkbox" id="fltHideProtected" /> Hide protected</label>
     <select id="sortBy">
       <option value="score-asc">Least engaged first</option>
       <option value="score-desc">Most engaged first</option>
@@ -50,7 +53,8 @@
       <option value="friended-old">Oldest friends first</option>
       <option value="name">Name A–Z</option>
     </select>
-    <label class="selall"><input type="checkbox" id="selAll" /> Select all shown</label>
+    <label class="selall"><input type="checkbox" id="selAll" /> Select all on page</label>
+    <a href="#" id="selAllMatch" class="selall-match hidden"></a>
   </section>
 
   <section class="tablewrap">
@@ -66,6 +70,7 @@
           <th>Last engaged</th>
           <th title="Date you became friends (from your Activity Log). Falls back to #N recency rank from the 'Recently added' list — #1 is your newest friend">Friended</th>
           <th>Status</th>
+          <th title="Protect a friend so they're never suggested or removed">Protect</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -75,6 +80,26 @@
       <strong>1 · Scan friends</strong>. A Facebook tab will open and scroll
       through your friends list automatically — leave it alone until the
       overlay says it's done.
+    </div>
+    <div id="noMatch" class="empty hidden">No friends match the current filters.</div>
+  </section>
+
+  <section id="pager" class="pager hidden">
+    <span id="pageInfo" class="pageinfo"></span>
+    <label class="inline">per page:
+      <select id="pageSize">
+        <option>25</option>
+        <option selected>50</option>
+        <option>100</option>
+        <option>200</option>
+      </select>
+    </label>
+    <div class="pgnav">
+      <button id="pgFirst" class="ghost pg">« First</button>
+      <button id="pgPrev" class="ghost pg">‹ Prev</button>
+      <span id="pageNum" class="pagenum"></span>
+      <button id="pgNext" class="ghost pg">Next ›</button>
+      <button id="pgLast" class="ghost pg">Last »</button>
     </div>
   </section>
 

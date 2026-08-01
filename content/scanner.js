@@ -15,6 +15,10 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const jitter = (min, max) => min + Math.random() * (max - min);
 
+  const DEBUG = window.__FRIENDSWEEP_DEBUG !== false;
+  const log = (...a) => DEBUG && console.log("[FriendSweep/scan]", ...a);
+  const warn = (...a) => console.warn("[FriendSweep/scan]", ...a);
+
   // ------------------------------------------------------------- HUD
 
   let hud = null;
@@ -149,7 +153,115 @@
     return [...byKey.values()].filter((f) => f.name);
   }
 
+  // Map a GraphQL friend record ({ name, photo, url, profileId }) onto the same
+  // canonical key the DOM scan uses, so records from either path merge cleanly.
+  function keyForGraphFriend(rec) {
+    if (rec.url) {
+      const p = profileKeyFromHref(rec.url);
+      if (p) return p;
+    }
+    if (rec.profileId) {
+      return {
+        key: "id:" + rec.profileId,
+        url: "https://www.facebook.com/profile.php?id=" + rec.profileId,
+      };
+    }
+    return null;
+  }
+
+  // Fast path: list the entire friends collection through Facebook's own
+  // GraphQL API (cursor pagination, no scrolling). Returns true on success;
+  // false hands control back to the DOM scroll-scan below with nothing lost.
+  async function runFriendScanGraph(selfUrl) {
+    const G = window.FriendSweepGraph;
+    if (!G) {
+      warn("friend scan: graph client not present — using DOM scan");
+      return false;
+    }
+
+    showHud("scanning friends (fast API mode)… don't touch this tab");
+    if (!(await G.waitForReady(12000))) {
+      warn("friend scan: no boilerplate captured within 12s — using DOM scan");
+      return false;
+    }
+
+    // The friends collection paginates from an opaque token that only
+    // Facebook's own pagination request reveals. Nudge the page to fire one by
+    // scrolling, then read the token the interceptor captured (any friends-list
+    // pagination query variant).
+    let token = G.getFriendsToken();
+    for (let i = 0; i < 10 && !token; i++) {
+      if (aborted) return false;
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(jitter(900, 1600));
+      token = G.getFriendsToken();
+    }
+    if (!token) {
+      warn("friend scan: never captured the friends collection token — using DOM scan (this means removals won't get numeric ids from the API path)");
+      return false;
+    }
+    log("friend scan: using API path with collection token");
+
+    const byKey = new Map();
+    const snapshot = () =>
+      [...byKey.values()].filter((f) => f.name || f.profileId);
+
+    let result;
+    try {
+      result = await G.scanFriends({
+        token,
+        onBatch: async (batch) => {
+          if (aborted) throw new Error("aborted");
+          // Collect only THIS page's entries to stream (not the whole cumulative
+          // list each time — that is O(n²) for large friend lists). The
+          // background upserts by key, so partial updates are safe.
+          const pageEntries = [];
+          for (const rec of batch) {
+            const k = keyForGraphFriend(rec);
+            if (!k) continue;
+            if (selfUrl && k.url === selfUrl) continue;
+            const entry = byKey.get(k.key) || { ...k, name: "", photo: "" };
+            if (!entry.name && isValidName(rec.name)) entry.name = rec.name;
+            if (!entry.photo && rec.photo) entry.photo = rec.photo;
+            if (rec.profileId) entry.profileId = String(rec.profileId);
+            byKey.set(k.key, entry);
+            pageEntries.push(entry);
+          }
+          showHud(`scanning friends (fast API mode)… ${byKey.size} found`);
+          if (pageEntries.length)
+            await send({ cmd: "friendScanResult", friends: pageEntries, phase: "all", done: false });
+        },
+      });
+    } catch (e) {
+      if (e && e.message === "aborted") return true; // aborted: nothing more to do
+      warn("friend scan: API pagination failed — using DOM scan:", (e && e.message) || e);
+      return false; // any API failure → fall back to DOM
+    }
+    if (!result || !result.ok) return false;
+
+    const friends = snapshot();
+    if (!friends.length) return false; // empty API result is suspicious; use DOM
+    const withId = friends.filter((f) => f.profileId).length;
+    log("friend scan: captured", friends.length, "friends via API,", withId, "with numeric ids");
+    await send({ cmd: "friendScanResult", friends, phase: "all", done: true });
+    showHud(`${friends.length} friends captured via API — now capturing friend order…`);
+    await sleep(3000);
+    hideHud();
+    return true;
+  }
+
   async function runFriendScan(selfUrl, phase) {
+    // The full-list phase can use the fast GraphQL path; the "recent order"
+    // phase relies on the Recently-Added tab's DOM ordering, so it stays below.
+    if (phase !== "recent") {
+      try {
+        if (await runFriendScanGraph(selfUrl)) return;
+      } catch (e) {
+        if (e && e.message === "aborted") return;
+        // fall through to the DOM scan
+      }
+    }
+
     const what =
       phase === "recent" ? "capturing friend order (recently added)" : "scanning friends";
     showHud(`${what}… don't touch this tab`);
@@ -398,20 +510,123 @@
     }
   }
 
-  async function collectReactions(post, selfUrl) {
-    const keys = new Set();
-    // The "see who reacted" affordance has shifted between a toolbar, a
-    // labelled span, and a bare count button over the years. Try each.
-    const btn =
-      findByText(post, ["button"], /see who reacted/i) ||
+  // ------------------------------------------------------------- dialogs
+  // Opening the reaction list is the flakiest step: a mis-aimed click can
+  // land on Comment/Share and pop a composer instead, and Facebook sometimes
+  // leaves a dialog mounted after we ask it to close. If a stray modal is
+  // left open it overlays the feed, blocks scrolling, and the scan stalls a
+  // few dozen posts in. These helpers make open/close explicit and verified.
+
+  const openDialogs = () => [...document.querySelectorAll('div[role="dialog"]')];
+
+  function pressEscape() {
+    for (const target of [document.activeElement, document.body, document]) {
+      if (!target) continue;
+      target.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }
+  }
+
+  function closeDialogOnce(dialog) {
+    const close =
+      dialog.querySelector('div[aria-label="Close"][role="button"]') ||
+      dialog.querySelector('[aria-label="Close"][role="button"]') ||
+      findByText(dialog, ["button"], /^close$/i);
+    if (close) realClick(close);
+    else pressEscape();
+  }
+
+  // Close every open dialog and wait until the DOM is actually clear. If a
+  // composer was opened by accident, closing it raises a "Discard post?"
+  // confirm — accept that too so nothing is left hanging.
+  async function dismissAnyDialog() {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const dialogs = openDialogs();
+      if (!dialogs.length) return true;
+      for (const d of dialogs) closeDialogOnce(d);
+      await sleep(jitter(300, 600));
+      const discard = findByText(
+        document,
+        ["button"],
+        /^(discard|discard post|leave page|leave|delete)$/i
+      );
+      if (discard) {
+        realClick(discard);
+        await sleep(jitter(300, 600));
+      }
+    }
+    return openDialogs().length === 0;
+  }
+
+  // The share/create-post composer carries an editable body and a
+  // create/share-ish label; the reactions list and post permalink dialogs
+  // do not. We must never scrape or get stuck on a composer.
+  function isComposerDialog(dialog) {
+    const label = (dialog.getAttribute("aria-label") || "").toLowerCase();
+    if (!/create|share|write|say something|post to|new post/.test(label)) return false;
+    return !!dialog.querySelector('[role="textbox"],[contenteditable="true"]');
+  }
+
+  // Pick the "see who reacted" control without ever grabbing the
+  // Like/Comment/Share action bar (clicking those opens the wrong thing).
+  const ACTION_LABEL_RE = /^(like|love|comment|share|send|reply|save)$/i;
+  function findReactionButton(post) {
+    const specific =
       post.querySelector('[aria-label*="reacted" i][role="button"]') ||
       post.querySelector('span[aria-label*="reacted" i]') ||
-      findByText(post, ["button"], /^(you|[\d,.]+[km]?)( and [\d,.]+[km]? others?)?$/i);
+      findByText(post, ["button"], /see who reacted/i);
+    if (specific) return specific;
+    // Last resort: the reaction-count summary ("You and 5 others"). Reject it
+    // if it's actually an action button so we don't trip a composer.
+    const cand = findByText(
+      post,
+      ["button"],
+      /^(you|[\d,.]+[km]?)( and [\d,.]+[km]? others?)?$/i
+    );
+    if (!cand) return null;
+    const label = (cand.getAttribute("aria-label") || "").trim();
+    if (ACTION_LABEL_RE.test(label) || ACTION_LABEL_RE.test(visibleText(cand))) return null;
+    return cand;
+  }
+
+  async function collectReactions(post, selfUrl) {
+    const keys = new Set();
+
+    // Clear any modal a previous post may have left mounted before we open a
+    // new one — otherwise the stale dialog gets scraped/scrolled instead.
+    await dismissAnyDialog();
+
+    const btn = findReactionButton(post);
     if (!btn) return keys;
 
+    const before = openDialogs();
     realClick(btn);
-    const dialog = await waitFor(() => document.querySelector('div[role="dialog"]'), 6000);
-    if (!dialog) return keys;
+
+    // Wait for a dialog that wasn't already present, so we never latch onto a
+    // leftover modal.
+    const dialog = await waitFor(() => {
+      const fresh = openDialogs().filter((d) => !before.includes(d));
+      return fresh[0] || null;
+    }, 6000);
+    if (!dialog) {
+      await dismissAnyDialog();
+      return keys;
+    }
+
+    // A mis-click opened the share/comment composer, not the reaction list —
+    // back out cleanly and skip this post's reactions.
+    if (isComposerDialog(dialog)) {
+      await dismissAnyDialog();
+      return keys;
+    }
 
     // Scroll the reactions list a few times to load more names.
     for (let i = 0; i < 8; i++) {
@@ -421,19 +636,15 @@
         (d) => d.scrollHeight > d.clientHeight + 50
       );
       if (!scrollable) break;
-      const before = scrollable.scrollTop;
+      const at = scrollable.scrollTop;
       scrollable.scrollTop = scrollable.scrollHeight;
       await sleep(jitter(700, 1200));
-      if (scrollable.scrollTop === before) break;
+      if (scrollable.scrollTop === at) break;
     }
     collectProfileKeys(dialog, selfUrl, keys);
 
-    const close =
-      dialog.querySelector('div[aria-label="Close"][role="button"]') ||
-      findByText(dialog, ["button"], /^close$/i);
-    if (close) realClick(close);
-    else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    await sleep(jitter(500, 900));
+    // Verified close — don't move on until the modal is gone.
+    await dismissAnyDialog();
     return keys;
   }
 
@@ -457,7 +668,74 @@
     return keys;
   }
 
+  // Fast path: read timeline posts and each post's reactors/commenters through
+  // Facebook's GraphQL API instead of opening reaction dialogs and expanding
+  // comment threads in the DOM. Returns true on success; false falls back to
+  // the DOM walk below. Emits the same engagementResult messages, so the
+  // background handler and dashboard are unchanged — feedbackId serves as the
+  // stable postId.
+  async function runEngagementScanGraph(job, selfUrl) {
+    const G = window.FriendSweepGraph;
+    if (!G) return false;
+
+    const days = job.days || 30;
+    const cutoff = Date.now() - days * 86400000;
+    showHud(`scanning engagement (last ${days} days, fast API mode)… don't touch this tab`);
+    if (!(await G.waitForReady(12000))) return false;
+    if (!G.getActorId()) return false;
+
+    let totalEvents = 0;
+    let result;
+    try {
+      result = await G.scanEngagement({
+        cutoffMs: cutoff,
+        maxPosts: job.maxPosts || 400,
+        onPost: async ({ feedbackId, atMs, reactions, comments, postsScanned }) => {
+          if (aborted) throw new Error("aborted");
+          const at = atMs !== null ? atMs : Date.now();
+          const events = [];
+          const seenEvent = new Set();
+          const add = (rec, type) => {
+            const k = keyForGraphFriend({ url: rec.url, profileId: rec.profileId });
+            if (!k) return;
+            if (selfUrl && k.url === selfUrl) return;
+            const dedup = k.key + "|" + type;
+            if (seenEvent.has(dedup)) return;
+            seenEvent.add(dedup);
+            events.push({ postId: feedbackId, friendKey: k.key, type, at });
+          };
+          for (const r of reactions) add(r, "reaction");
+          for (const c of comments) add(c, "comment");
+          totalEvents += events.length;
+          showHud(
+            `scanning engagement (fast API mode)… ${postsScanned} posts, ${totalEvents} events (back to ${new Date(cutoff).toLocaleDateString()})`
+          );
+          await send({ cmd: "engagementResult", events, postsScanned, done: false });
+        },
+      });
+    } catch (e) {
+      if (e && e.message === "aborted") return true;
+      return false; // any API failure → fall back to the DOM walk
+    }
+    if (!result || !result.ok) return false;
+
+    await send({ cmd: "engagementResult", events: [], postsScanned: result.postsScanned, done: true });
+    showHud(
+      `done — scanned ${result.postsScanned} posts via API (${totalEvents} engagement events). You can close this tab.`
+    );
+    await sleep(4000);
+    hideHud();
+    return true;
+  }
+
   async function runEngagementScan(job, selfUrl) {
+    try {
+      if (await runEngagementScanGraph(job, selfUrl)) return;
+    } catch (e) {
+      if (e && e.message === "aborted") return;
+      // fall through to the DOM walk
+    }
+
     const days = job.days || 30;
     const cutoff = Date.now() - days * 86400000;
     const maxPosts = job.maxPosts || 400; // safety cap only
@@ -473,6 +751,9 @@
       if (aborted) return;
       const posts = getPostArticles().filter((p) => !seen.has(p));
       if (!posts.length) {
+        // A modal left open by the previous round would overlay the feed and
+        // stop new posts from loading — make sure we're clear before scrolling.
+        await dismissAnyDialog();
         window.scrollTo(0, document.body.scrollHeight);
         await sleep(jitter(1500, 2500));
         idleRounds++;
@@ -546,6 +827,16 @@
 
   // ------------------------------------------------------------- unfriend
 
+  // Recover a friend's numeric Facebook id for the GraphQL unfriend mutation.
+  // Friends captured via the API carry profileId directly; older DOM-scanned
+  // records still expose it through an "id:" key or a profile.php?id= URL.
+  function friendNumericId(friend) {
+    if (friend.profileId) return String(friend.profileId);
+    if (friend.key && friend.key.indexOf("id:") === 0) return friend.key.slice(3);
+    const m = (friend.url || "").match(/profile\.php\?id=(\d+)/);
+    return m ? m[1] : null;
+  }
+
   async function runUnfriend(friend) {
     showHud(`removing ${friend.name}…`);
     const fail = async (error) => {
@@ -569,6 +860,23 @@
       });
     }
 
+    // Fast path: a single GraphQL mutation — no menu-clicking, no confirm modal.
+    // Falls through to the DOM flow below if the API isn't usable for this
+    // friend (no boilerplate captured yet, or no numeric id available).
+    const G = window.FriendSweepGraph;
+    const targetId = friendNumericId(friend);
+    if (G && targetId && (await G.waitForReady(10000))) {
+      const res = await G.unfriend(targetId);
+      if (res.ok) {
+        showHud(`removed ${friend.name}`);
+        await send({ cmd: "removalResult", friendKey: friend.key, ok: true });
+        await sleep(1500);
+        hideHud();
+        return;
+      }
+      // Non-fatal: log nothing to the user and try the DOM flow instead.
+    }
+
     const friendsBtn = findByText(main, ["button"], /^friends$/i);
     if (!friendsBtn) return fail("Friends button not found (page layout changed?)");
     realClick(friendsBtn);
@@ -581,10 +889,32 @@
     await sleep(jitter(400, 900));
     realClick(unfriendItem);
 
+    // The confirm modal is NOT reliably the first role="dialog": clicking the
+    // "Friends" button leaves its dropdown mounted (Facebook renders that menu
+    // as a role="dialog" too), and it sits earlier in the DOM than the confirm
+    // modal. So scan every open dialog, and within the right one fall back to
+    // "the primary button that isn't Cancel" if the label wording changed.
     const confirmBtn = await waitFor(() => {
-      const dialog = document.querySelector('div[role="dialog"]');
-      if (!dialog) return null;
-      return findByText(dialog, ["button"], /^(confirm|unfriend)$/i);
+      for (const dialog of openDialogs()) {
+        const explicit = findByText(
+          dialog,
+          ["button"],
+          /^(confirm|unfriend|remove|ok|yes)$/i
+        );
+        if (explicit) return explicit;
+        // Positional fallback: a confirm dialog holds just Cancel + the primary
+        // action. Take the last button that isn't a cancel/close/back control.
+        const buttons = [...dialog.querySelectorAll('[role="button"]')].filter(
+          (b) => {
+            const s = (b.getAttribute("aria-label") || visibleText(b)).trim();
+            return s && s.length < 40 && !/^(cancel|close|back|not now)$/i.test(s);
+          }
+        );
+        // Only trust the fallback for a small, confirm-shaped dialog so we don't
+        // misfire on the menu (which has many items).
+        if (buttons.length && buttons.length <= 3) return buttons[buttons.length - 1];
+      }
+      return null;
     }, 8000);
     if (!confirmBtn) return fail("confirmation dialog not found");
     await sleep(jitter(400, 900));
@@ -600,6 +930,115 @@
     showHud(`removed ${friend.name}`);
     await send({ cmd: "removalResult", friendKey: friend.key, ok: true });
     await sleep(2000);
+    hideHud();
+  }
+
+  // Batch removal: remove the entire selected queue from this one tab via
+  // GraphQL unfriend mutations — no per-friend profile navigation. Each friend
+  // is one lightweight request; pacing between them is the safety valve. If the
+  // API path isn't available, hand back to the background worker to run the
+  // legacy per-profile flow.
+  async function runRemovalBatch(friends, job) {
+    const G = window.FriendSweepGraph;
+    const delays = (job && job.delays) || { minSec: 20, maxSec: 45 };
+    const total = friends.length;
+
+    showHud(`removing ${total} friend${total === 1 ? "" : "s"} via API… don't touch this tab`);
+    log("batch removal starting for", total, "friend(s)");
+
+    const ready = G ? await G.waitForReady(12000) : false;
+    const actorId = G ? G.getActorId() : null;
+    if (!G || !ready || !actorId) {
+      warn("API path unavailable — graph loaded:", !!G, "boilerplate ready:", ready, "actorId:", actorId, "→ falling back to per-profile DOM removal");
+      await send({ cmd: "removalFallback" });
+      showHud("API unavailable — switching to the standard removal method…");
+      await sleep(2500);
+      hideHud();
+      return;
+    }
+    log("API path ready; actor id =", actorId);
+
+    // We open removal on the friends page so the collection token is available
+    // for the friends search API (used to backfill any missing numeric id).
+    // Nudge the page to fire its pagination query so the token gets captured.
+    let haveToken = !!G.getFriendsToken();
+    for (let i = 0; i < 8 && !haveToken && !aborted; i++) {
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(jitter(700, 1200));
+      haveToken = !!G.getFriendsToken();
+    }
+    log("batch removal: friends collection token", haveToken ? "available" : "NOT available (search backfill disabled)");
+
+    // Derive a vanity username from a "u:" key or profile URL, for search matching.
+    const vanityOf = (friend) => {
+      if (friend.key && friend.key.indexOf("u:") === 0) return friend.key.slice(2);
+      const m = (friend.url || "").match(/facebook\.com\/([A-Za-z0-9.\-]+)\/?$/);
+      return m && m[1] !== "profile.php" ? m[1] : null;
+    };
+
+    let done = 0;
+    let failed = 0;
+    for (let i = 0; i < friends.length; i++) {
+      if (aborted) break;
+      const friend = friends[i];
+      if (!friend) continue;
+
+      let targetId = friendNumericId(friend);
+      let resolvedId = null;
+      if (!targetId) {
+        // 1. Backfill via the friends search API (reliable, ~1 KB).
+        if (haveToken) {
+          showHud(`looking up ${friend.name || "friend"} id…`);
+          log("resolving numeric id for", friend.name || friend.key, "via friends search");
+          resolvedId = await G.searchFriendId({ name: friend.name, vanity: vanityOf(friend) });
+        }
+        // 2. Last resort: scrape the profile page (fragile, ~1 MB).
+        if (!resolvedId && friend.url) {
+          log("resolving numeric id for", friend.name || friend.key, "from profile page", friend.url);
+          resolvedId = await G.resolveProfileId(friend.url, friend.name);
+        }
+        if (resolvedId) targetId = resolvedId;
+      }
+      if (!targetId) {
+        warn("skipping", friend.name || friend.key, "— could not obtain a numeric profile id (key:", friend.key + ", profileId:", friend.profileId + ", url:", friend.url + ")");
+      }
+      const res = targetId
+        ? await G.unfriend(targetId)
+        : { ok: false, error: "could not resolve a numeric profile id" };
+
+      if (res.ok) {
+        done++;
+        log("removed", friend.name || friend.key);
+      } else {
+        failed++;
+        warn("failed to remove", friend.name || friend.key, "—", res.error);
+      }
+      await send({
+        cmd: "removalResult",
+        friendKey: friend.key,
+        ok: res.ok,
+        error: res.error,
+        // Persist a freshly-resolved id even on failure, so a retry skips lookup.
+        profileId: resolvedId || undefined,
+      });
+      showHud(
+        `removing friends via API… ${done} removed${failed ? `, ${failed} failed` : ""} (${i + 1}/${total})`
+      );
+
+      // Pace between removals (no wait after the last one). Randomized, from the
+      // user's removal-delay settings, to stay human-ish and avoid soft blocks.
+      if (i < friends.length - 1 && !aborted) {
+        await sleep(jitter(delays.minSec * 1000, delays.maxSec * 1000));
+      }
+    }
+
+    if (aborted) return; // cancel already cleared the job and hid the HUD
+
+    await send({ cmd: "removalBatchComplete" });
+    showHud(
+      `done — removed ${done} friend${done === 1 ? "" : "s"}${failed ? `, ${failed} failed` : ""}. You can close this tab.`
+    );
+    await sleep(4000);
     hideHud();
   }
 
@@ -627,8 +1066,12 @@
         await runFriendDatesScan();
       } else if (job.type === "engagementScan") {
         await runEngagementScan(job, resp.selfUrl);
-      } else if (job.type === "removal" && resp.friend) {
-        await runUnfriend(resp.friend);
+      } else if (job.type === "removal") {
+        if (job.mode === "batch") {
+          await runRemovalBatch(resp.friends || [], job);
+        } else if (resp.friend) {
+          await runUnfriend(resp.friend);
+        }
       }
     } catch (e) {
       if (e.message !== "aborted") {

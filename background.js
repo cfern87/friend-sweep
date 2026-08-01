@@ -136,21 +136,32 @@ async function startRemoval(friendKeys) {
   const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
   const cap = settings.maxRemovalsPerRun || 20;
   const queue = friendKeys
-    .filter((k) => friends[k] && !friends[k].removedAt)
+    .filter((k) => friends[k] && !friends[k].removedAt && !friends[k].whitelisted)
     .slice(0, cap);
   if (!queue.length) return;
+  // Batch mode: open the friends page and remove the whole selection from it via
+  // GraphQL unfriend mutations — no per-friend profile navigation. The friends
+  // page is used (rather than the home feed) so the friends-collection token is
+  // available, letting us resolve any missing numeric id via the friends search
+  // API. The content script picks the batch up through its getJob handshake, and
+  // falls back to the legacy per-profile flow if the API path can't run.
+  const tabId = await openJobTab(FB + "/me/friends");
   await setJob({
     type: "removal",
+    mode: "batch",
     status: "running",
-    tabId: null,
+    tabId,
     startedAt: Date.now(),
     queue,
     done: [],
     failed: [],
     current: null,
     progress: { total: queue.length, done: 0, failed: 0 },
+    delays: {
+      minSec: settings.removeDelayMinSec || 20,
+      maxSec: settings.removeDelayMaxSec || 45,
+    },
   });
-  await removalNext();
 }
 
 async function removalNext() {
@@ -179,7 +190,39 @@ async function removalNext() {
 
 async function handleRemovalResult(msg) {
   const job = await getJob();
-  if (!job || job.type !== "removal" || job.current !== msg.friendKey) return;
+  if (!job || job.type !== "removal") return;
+
+  // Batch mode: the content script drives the loop and pacing, sending one
+  // result per friend. We just record each outcome; completion arrives as a
+  // separate "removalBatchComplete" message.
+  if (job.mode === "batch") {
+    const { friends = {} } = await getStore("friends");
+    let friendsChanged = false;
+    // Persist any numeric id the content script resolved live, so it's captured
+    // once and reused (even if this removal itself failed).
+    if (msg.profileId && friends[msg.friendKey] && !friends[msg.friendKey].profileId) {
+      friends[msg.friendKey].profileId = String(msg.profileId);
+      friendsChanged = true;
+    }
+    if (msg.ok) {
+      if (!job.done.includes(msg.friendKey)) {
+        job.done.push(msg.friendKey);
+        job.progress.done++;
+      }
+      if (friends[msg.friendKey]) {
+        friends[msg.friendKey].removedAt = Date.now();
+        friendsChanged = true;
+      }
+    } else {
+      job.failed.push({ key: msg.friendKey, error: msg.error || "unknown" });
+      job.progress.failed++;
+    }
+    if (friendsChanged) await setStore({ friends });
+    await setJob(job);
+    return;
+  }
+
+  if (job.current !== msg.friendKey) return;
 
   const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
   if (msg.ok) {
@@ -231,6 +274,8 @@ async function handleFriendScanResult(msg) {
       photo: f.photo || (prev && prev.photo) || "",
       firstSeen: (prev && prev.firstSeen) || now,
       lastSeen: now,
+      // Numeric FB id (from the GraphQL scan) — enables one-shot removal later.
+      ...(f.profileId ? { profileId: f.profileId } : {}),
       // The "Recently added" tab lists friends newest-first, so the DOM
       // index is a friendship-recency rank (0 = most recently added).
       ...(msg.phase === "recent" ? { recentRank: i } : {}),
@@ -396,8 +441,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         if (job.type === "removal") {
           const { friends = {} } = await getStore("friends");
-          const f = friends[job.current];
-          sendResponse({ job, friend: f || null });
+          if (job.mode === "batch") {
+            // Hand the content script the whole queue's friend records so it can
+            // remove them all from this one tab.
+            const list = job.queue.map((k) => friends[k]).filter(Boolean);
+            sendResponse({ job, friends: list });
+          } else {
+            const f = friends[job.current];
+            sendResponse({ job, friend: f || null });
+          }
         } else {
           const { selfUrl } = await getStore("selfUrl");
           sendResponse({ job, selfUrl: selfUrl || null });
@@ -420,6 +472,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await handleRemovalResult(msg);
         sendResponse({ ok: true });
         break;
+      case "removalBatchComplete": {
+        const job = await getJob();
+        if (job && job.type === "removal" && job.mode === "batch") {
+          job.status = "finished";
+          job.finishedAt = Date.now();
+          job.current = null;
+          await setJob(job);
+        }
+        sendResponse({ ok: true });
+        break;
+      }
+      case "removalFallback": {
+        // The content script couldn't run the API batch (no boilerplate/actor
+        // id). Switch to the legacy per-profile navigation flow for this job.
+        const job = await getJob();
+        if (job && job.type === "removal" && job.mode === "batch") {
+          job.mode = "legacy";
+          await setJob(job);
+          await removalNext();
+        }
+        sendResponse({ ok: true });
+        break;
+      }
       case "jobError": {
         const job = await getJob();
         if (job) {
