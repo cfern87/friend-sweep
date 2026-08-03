@@ -43,7 +43,7 @@
     <input type="search" id="search" placeholder="Search name…" />
     <label><input type="checkbox" id="fltNoEngagement" /> No engagement only</label>
     <label><input type="checkbox" id="fltHideRemoved" checked /> Hide removed</label>
-    <label><input type="checkbox" id="fltHideProtected" /> Hide protected</label>
+    <label><input type="checkbox" id="fltHideProtected" checked /> Hide protected</label>
     <select id="sortBy">
       <option value="score-asc">Least engaged first</option>
       <option value="score-desc">Most engaged first</option>
@@ -104,6 +104,51 @@
   </section>
 
   <footer>
+    <details>
+      <summary>Automatic scans</summary>
+      <div class="settings auto">
+        <label class="switch">
+          <span>Re-scan automatically</span>
+          <input type="checkbox" id="autoEnabled" />
+        </label>
+        <label>Run every
+          <select id="autoEvery">
+            <option value="6">6 hours</option>
+            <option value="12">12 hours</option>
+            <option value="24" selected>day</option>
+            <option value="72">3 days</option>
+            <option value="168">week</option>
+          </select>
+        </label>
+        <label>Engagement window
+          <select id="autoDays">
+            <option value="7">1 week</option>
+            <option value="14">2 weeks</option>
+            <option value="30" selected>1 month</option>
+            <option value="60">2 months</option>
+            <option value="90">3 months</option>
+            <option value="180">6 months</option>
+            <option value="365">1 year</option>
+          </select>
+        </label>
+        <fieldset class="scanpick">
+          <legend>Scans to run</legend>
+          <label><input type="checkbox" id="autoScanFriends" /> Friends list</label>
+          <label><input type="checkbox" id="autoScanDates" /> Friend dates</label>
+          <label><input type="checkbox" id="autoScanEngagement" /> Engagement</label>
+        </fieldset>
+        <div class="group">
+          <button id="btnRunSchedule" class="ghost">Run now</button>
+          <span id="autoNext" class="inline"></span>
+        </div>
+        <p class="note">
+          Scheduled runs open a Facebook tab and take focus while they scroll,
+          so pick a cadence you won't mind interrupting you. Only scans are
+          automated — friend removals always stay manual. Runs are skipped
+          while another job is going, and only fire while Chrome is open.
+        </p>
+      </div>
+    </details>
     <details>
       <summary>Settings &amp; safety</summary>
       <div class="settings">

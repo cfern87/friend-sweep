@@ -7,8 +7,15 @@ const $ = (id) => document.getElementById(id);
 let friends = {};
 let engagement = {};
 let settings = {};
+let schedule = null;
 let job = null;
 const selected = new Set();
+
+// How long a finished job's result banner stays on screen before it clears
+// itself. The background worker also sweeps finished jobs, so the banner still
+// goes away if the dashboard isn't open.
+const JOB_BANNER_MS = 10000;
+let jobDismissTimer = null;
 
 // Pagination state. `page` is 1-based; `lastPageRows`/`lastMatched` cache the
 // current view so the select-all handlers can act without re-deriving it.
@@ -23,18 +30,33 @@ let lastMatchedKeys = [];
 // ------------------------------------------------------------- data
 
 async function load() {
-  const data = await chrome.storage.local.get(["friends", "engagement", "settings", "job"]);
+  const data = await chrome.storage.local.get([
+    "friends", "engagement", "settings", "job", "schedule",
+  ]);
   friends = data.friends || {};
   engagement = data.engagement || {};
   settings = Object.assign(
-    { maxRemovalsPerRun: 20, removeDelayMinSec: 30, removeDelayMaxSec: 60 },
+    {
+      maxRemovalsPerRun: 20,
+      removeDelayMinSec: 30,
+      removeDelayMaxSec: 60,
+      // Protected friends are ones you've already decided to keep, so they're
+      // noise in a clean-up list — hidden until you ask for them.
+      hideProtected: true,
+    },
     data.settings || {}
   );
   job = data.job || null;
+  // Ask the worker rather than trusting storage, so an unsaved schedule still
+  // shows the same defaults the worker would run with.
+  const resp = await chrome.runtime.sendMessage({ cmd: "getSchedule" }).catch(() => null);
+  schedule = (resp && resp.schedule) || data.schedule || null;
   pageSize = settings.pageSize || 50;
   $("pageSize").value = String(pageSize);
+  $("fltHideProtected").checked = settings.hideProtected !== false;
   render();
   renderSettings();
+  renderSchedule();
 }
 
 function aggregates() {
@@ -344,11 +366,22 @@ function updateActionButtons() {
 
 function renderJob() {
   const bar = $("jobBar");
+  const running = !!(job && job.status === "running");
+  // Cancelling only means something while work is actually in flight.
+  $("btnCancel").disabled = !running;
+  $("btnCancel").title = running ? "" : "No job is running";
+
   if (!job) {
+    if (jobDismissTimer) {
+      clearTimeout(jobDismissTimer);
+      jobDismissTimer = null;
+    }
     bar.classList.add("hidden");
+    bar.textContent = "";
     return;
   }
   bar.classList.remove("hidden", "error", "finished");
+  bar.textContent = "";
   let text = "";
   const p = job.progress || {};
   if (job.type === "friendScan") {
@@ -366,12 +399,54 @@ function renderJob() {
       text += ` · next in ~${Math.round((job.nextStepAt - Date.now()) / 1000)}s`;
     }
   }
+  if (job.auto) text = "Scheduled · " + text;
+  if (Array.isArray(job.chain) && job.chain.length) {
+    text += ` · ${job.chain.length} more scan${job.chain.length === 1 ? "" : "s"} queued`;
+  }
   if (job.status === "error") {
     bar.classList.add("error");
     text += ` — ${job.error || ""}`;
   }
   if (job.status === "finished") bar.classList.add("finished");
-  bar.textContent = text;
+
+  const label = document.createElement("span");
+  label.textContent = text;
+  bar.appendChild(label);
+
+  if (!running) {
+    // A job that has ended clears itself; the × is just for the impatient (and
+    // for errors, which stay put until they've been read). Mid-chain it's also
+    // the way to call off the scans still queued behind this one.
+    const chained = Array.isArray(job.chain) && job.chain.length > 0;
+    const x = document.createElement("button");
+    x.className = "jobclose";
+    x.textContent = "×";
+    x.title = chained ? "Stop the remaining scans" : "Dismiss";
+    x.addEventListener("click", dismissJob);
+    bar.appendChild(x);
+    // Auto-dismissing a chained job would clear the job the next scan is
+    // waiting on, so leave it up until the chain moves on by itself.
+    if (job.status === "finished" && !chained) scheduleJobDismiss();
+  }
+}
+
+function dismissJob() {
+  if (jobDismissTimer) {
+    clearTimeout(jobDismissTimer);
+    jobDismissTimer = null;
+  }
+  chrome.runtime.sendMessage({ cmd: "dismissJob" });
+}
+
+// Retire the finished-job banner on its own, measured from when the job
+// actually ended so a reopened dashboard doesn't restart the clock.
+function scheduleJobDismiss() {
+  if (jobDismissTimer) return;
+  const elapsed = Date.now() - (job.finishedAt || Date.now());
+  jobDismissTimer = setTimeout(() => {
+    jobDismissTimer = null;
+    if (job && job.status === "finished") dismissJob();
+  }, Math.max(1000, JOB_BANNER_MS - elapsed));
 }
 
 function renderSettings() {
@@ -380,6 +455,79 @@ function renderSettings() {
   $("setDelayMax").value = settings.removeDelayMaxSec;
   if (settings.scanDays) $("scanDays").value = String(settings.scanDays);
 }
+
+// ------------------------------------------------------------- schedule
+
+const SCAN_BOXES = {
+  friendScan: "autoScanFriends",
+  friendDatesScan: "autoScanDates",
+  engagementScan: "autoScanEngagement",
+};
+
+function fmtWhen(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const today = new Date().toDateString() === d.toDateString();
+  return (today ? "today " : d.toLocaleDateString() + " ") +
+    d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function renderSchedule() {
+  const s = schedule || {};
+  $("autoEnabled").checked = !!s.enabled;
+  $("autoEvery").value = String(s.everyHours || 24);
+  $("autoDays").value = String(s.days || 30);
+  const chosen = s.scans || ["friendScan", "engagementScan"];
+  for (const [type, id] of Object.entries(SCAN_BOXES)) {
+    $(id).checked = chosen.includes(type);
+  }
+  // Every control below the switch only matters once it's on.
+  for (const id of ["autoEvery", "autoDays", ...Object.values(SCAN_BOXES)]) {
+    $(id).disabled = !s.enabled;
+  }
+
+  const parts = [];
+  if (s.enabled && s.nextRunAt) parts.push(`Next run ${fmtWhen(s.nextRunAt)}`);
+  else if (s.enabled) parts.push("Scheduling…");
+  else parts.push("Off");
+  if (s.lastRunAt) parts.push(`last run ${fmtWhen(s.lastRunAt)}`);
+  $("autoNext").textContent = parts.join(" · ");
+}
+
+// Any change to the panel is applied immediately — there's no Save button here
+// because a schedule you forgot to save is a schedule that never runs.
+async function saveSchedule() {
+  const scans = Object.entries(SCAN_BOXES)
+    .filter(([, id]) => $(id).checked)
+    .map(([type]) => type);
+  const resp = await chrome.runtime.sendMessage({
+    cmd: "setSchedule",
+    schedule: {
+      enabled: $("autoEnabled").checked,
+      everyHours: parseInt($("autoEvery").value, 10) || 24,
+      days: parseInt($("autoDays").value, 10) || 30,
+      scans,
+    },
+  });
+  schedule = (resp && resp.schedule) || schedule;
+  renderSchedule();
+}
+
+for (const id of ["autoEnabled", "autoEvery", "autoDays", ...Object.values(SCAN_BOXES)]) {
+  $(id).addEventListener("change", saveSchedule);
+}
+
+$("btnRunSchedule").addEventListener("click", async () => {
+  const scans = Object.values(SCAN_BOXES).filter((id) => $(id).checked);
+  if (!scans.length) {
+    alert("Pick at least one scan to run.");
+    return;
+  }
+  // "Run now" honours the panel's picks even when the schedule itself is off,
+  // so it doubles as a one-click way to run the whole scan sequence.
+  await saveSchedule();
+  await chrome.runtime.sendMessage({ cmd: "runScheduleNow" });
+});
 
 // Whitelist a friend so they're never suggested or removed. The flag lives on
 // the friend record and survives re-scans (scans spread the previous record).
@@ -533,6 +681,12 @@ for (const id of ["search", "fltNoEngagement", "fltHideRemoved", "fltHideProtect
   $(id).addEventListener("input", () => { page = 1; render(); });
 }
 
+// Protected friends are hidden by default; remember when that's overridden.
+$("fltHideProtected").addEventListener("change", async () => {
+  settings.hideProtected = $("fltHideProtected").checked;
+  await chrome.storage.local.set({ settings });
+});
+
 $("btnSaveSettings").addEventListener("click", async () => {
   settings.maxRemovalsPerRun = Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20);
   settings.removeDelayMinSec = Math.max(20, parseInt($("setDelayMin").value, 10) || 30);
@@ -558,6 +712,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.engagement) engagement = changes.engagement.newValue || {};
   if (changes.job) job = changes.job.newValue || null;
   if (changes.settings) settings = changes.settings.newValue || settings;
+  if (changes.schedule) {
+    schedule = changes.schedule.newValue || null;
+    renderSchedule();
+  }
   render();
 });
 
