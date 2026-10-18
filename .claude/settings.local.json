@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node \"C:/Users/cfern/AppData/Local/Temp/claude/C--Users-cfern-OneDrive-Documents-Git-friend-sweep/3ce936f7-4c48-47b4-8227-f107a986cc45/scratchpad/simulate.js\" \"C:/Users/cfern/OneDrive/Documents/Git/friend-sweep/sync.js\")",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
