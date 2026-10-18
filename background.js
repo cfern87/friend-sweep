@@ -2,6 +2,9 @@
 // Orchestrates jobs (friend scan, engagement scan, removals) by driving a
 // Facebook tab and messaging the content script. All job state lives in
 // chrome.storage.local so the worker can be killed and revived safely.
+// sync.js mirrors that data into chrome.storage.sync across browsers.
+
+importScripts("sync.js");
 
 const FB = "https://www.facebook.com";
 
@@ -26,17 +29,19 @@ function cleanName(name) {
 // One-time scrub of records logged with a noise "name" by earlier versions.
 // The real name is refilled by the next friend scan.
 async function scrubNoiseNames() {
-  const { friends } = await chrome.storage.local.get("friends");
-  if (!friends) return;
-  let changed = false;
-  for (const f of Object.values(friends)) {
-    const cleaned = cleanName(f.name);
-    if (cleaned !== f.name) {
-      f.name = cleaned;
-      changed = true;
+  await withStoreLock(async () => {
+    const { friends } = await chrome.storage.local.get("friends");
+    if (!friends) return;
+    let changed = false;
+    for (const f of Object.values(friends)) {
+      const cleaned = cleanName(f.name);
+      if (cleaned !== f.name) {
+        f.name = cleaned;
+        changed = true;
+      }
     }
-  }
-  if (changed) await chrome.storage.local.set({ friends });
+    if (changed) await chrome.storage.local.set({ friends });
+  });
 }
 
 chrome.runtime.onInstalled.addListener(scrubNoiseNames);
@@ -50,6 +55,17 @@ async function getStore(keys) {
 
 async function setStore(obj) {
   return chrome.storage.local.set(obj);
+}
+
+// Serializes read-modify-write of the shared records (friends, engagement,
+// settings). Scan results, dashboard edits and incoming sync all rewrite the
+// whole `friends` map, so without this one could silently drop another's
+// change. Never call it from inside a locked function — it isn't reentrant.
+let storeLock = Promise.resolve();
+function withStoreLock(fn) {
+  const run = storeLock.then(fn, fn);
+  storeLock = run.catch(() => {});
+  return run;
 }
 
 async function getJob() {
@@ -268,42 +284,47 @@ async function handleRemovalResult(msg) {
   // result per friend. We just record each outcome; completion arrives as a
   // separate "removalBatchComplete" message.
   if (job.mode === "batch") {
-    const { friends = {} } = await getStore("friends");
-    let friendsChanged = false;
-    // Persist any numeric id the content script resolved live, so it's captured
-    // once and reused (even if this removal itself failed).
-    if (msg.profileId && friends[msg.friendKey] && !friends[msg.friendKey].profileId) {
-      friends[msg.friendKey].profileId = String(msg.profileId);
-      friendsChanged = true;
-    }
+    await withStoreLock(async () => {
+      const { friends = {} } = await getStore("friends");
+      let friendsChanged = false;
+      // Persist any numeric id the content script resolved live, so it's captured
+      // once and reused (even if this removal itself failed).
+      if (msg.profileId && friends[msg.friendKey] && !friends[msg.friendKey].profileId) {
+        friends[msg.friendKey].profileId = String(msg.profileId);
+        friendsChanged = true;
+      }
+      if (msg.ok && friends[msg.friendKey]) {
+        friends[msg.friendKey].removedAt = Date.now();
+        friendsChanged = true;
+      }
+      if (friendsChanged) await setStore({ friends });
+    });
     if (msg.ok) {
       if (!job.done.includes(msg.friendKey)) {
         job.done.push(msg.friendKey);
         job.progress.done++;
       }
-      if (friends[msg.friendKey]) {
-        friends[msg.friendKey].removedAt = Date.now();
-        friendsChanged = true;
-      }
     } else {
       job.failed.push({ key: msg.friendKey, error: msg.error || "unknown" });
       job.progress.failed++;
     }
-    if (friendsChanged) await setStore({ friends });
     await setJob(job);
     return;
   }
 
   if (job.current !== msg.friendKey) return;
 
-  const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
+  const { settings = {} } = await getStore("settings");
   if (msg.ok) {
     job.done.push(msg.friendKey);
     job.progress.done++;
-    if (friends[msg.friendKey]) {
-      friends[msg.friendKey].removedAt = Date.now();
-      await setStore({ friends });
-    }
+    await withStoreLock(async () => {
+      const { friends = {} } = await getStore("friends");
+      if (friends[msg.friendKey]) {
+        friends[msg.friendKey].removedAt = Date.now();
+        await setStore({ friends });
+      }
+    });
   } else {
     job.failed.push({ key: msg.friendKey, error: msg.error || "unknown" });
     job.progress.failed++;
@@ -348,25 +369,28 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 async function handleFriendScanResult(msg) {
   const now = Date.now();
-  const { friends = {} } = await getStore("friends");
-  msg.friends.forEach((f, i) => {
-    const prev = friends[f.key];
-    friends[f.key] = {
-      ...prev,
-      key: f.key,
-      name: cleanName(f.name) || cleanName(prev && prev.name) || "",
-      url: f.url,
-      photo: f.photo || (prev && prev.photo) || "",
-      firstSeen: (prev && prev.firstSeen) || now,
-      lastSeen: now,
-      // Numeric FB id (from the GraphQL scan) — enables one-shot removal later.
-      ...(f.profileId ? { profileId: f.profileId } : {}),
-      // The "Recently added" tab lists friends newest-first, so the DOM
-      // index is a friendship-recency rank (0 = most recently added).
-      ...(msg.phase === "recent" ? { recentRank: i } : {}),
-    };
+  const friends = await withStoreLock(async () => {
+    const { friends = {} } = await getStore("friends");
+    msg.friends.forEach((f, i) => {
+      const prev = friends[f.key];
+      friends[f.key] = {
+        ...prev,
+        key: f.key,
+        name: cleanName(f.name) || cleanName(prev && prev.name) || "",
+        url: f.url,
+        photo: f.photo || (prev && prev.photo) || "",
+        firstSeen: (prev && prev.firstSeen) || now,
+        lastSeen: now,
+        // Numeric FB id (from the GraphQL scan) — enables one-shot removal later.
+        ...(f.profileId ? { profileId: f.profileId } : {}),
+        // The "Recently added" tab lists friends newest-first, so the DOM
+        // index is a friendship-recency rank (0 = most recently added).
+        ...(msg.phase === "recent" ? { recentRank: i } : {}),
+      };
+    });
+    await setStore({ friends });
+    return friends;
   });
-  await setStore({ friends });
 
   const job = await getJob();
   if (!job || job.type !== "friendScan") return;
@@ -391,38 +415,41 @@ async function handleFriendScanResult(msg) {
 
 async function handleFriendDatesResult(msg) {
   const now = Date.now();
-  const { friends = {} } = await getStore("friends");
+  const friends = await withStoreLock(async () => {
+    const { friends = {} } = await getStore("friends");
 
-  // Entries whose name link couldn't be resolved to a profile URL are
-  // matched by exact name — but only when the name is unambiguous.
-  const byName = new Map();
-  for (const f of Object.values(friends)) {
-    const n = (f.name || "").toLowerCase();
-    if (!n) continue;
-    if (!byName.has(n)) byName.set(n, []);
-    byName.get(n).push(f.key);
-  }
+    // Entries whose name link couldn't be resolved to a profile URL are
+    // matched by exact name — but only when the name is unambiguous.
+    const byName = new Map();
+    for (const f of Object.values(friends)) {
+      const n = (f.name || "").toLowerCase();
+      if (!n) continue;
+      if (!byName.has(n)) byName.set(n, []);
+      byName.get(n).push(f.key);
+    }
 
-  for (const e of msg.entries) {
-    let key = e.key;
-    if (!key && e.name) {
-      const candidates = byName.get(e.name.toLowerCase()) || [];
-      if (candidates.length === 1) key = candidates[0];
+    for (const e of msg.entries) {
+      let key = e.key;
+      if (!key && e.name) {
+        const candidates = byName.get(e.name.toLowerCase()) || [];
+        if (candidates.length === 1) key = candidates[0];
+      }
+      if (!key) continue;
+      if (!friends[key]) {
+        friends[key] = {
+          key,
+          name: cleanName(e.name),
+          url: e.url || "",
+          photo: "",
+          firstSeen: now,
+          lastSeen: now,
+        };
+      }
+      friends[key].friendedAt = e.friendedAt;
     }
-    if (!key) continue;
-    if (!friends[key]) {
-      friends[key] = {
-        key,
-        name: cleanName(e.name),
-        url: e.url || "",
-        photo: "",
-        firstSeen: now,
-        lastSeen: now,
-      };
-    }
-    friends[key].friendedAt = e.friendedAt;
-  }
-  await setStore({ friends });
+    await setStore({ friends });
+    return friends;
+  });
 
   const job = await getJob();
   if (job && job.type === "friendDatesScan") {
@@ -434,16 +461,19 @@ async function handleFriendDatesResult(msg) {
 
 async function handleEngagementResult(msg) {
   const now = Date.now();
-  const { engagement = {} } = await getStore("engagement");
-  let added = 0;
-  for (const ev of msg.events) {
-    const key = `${ev.postId}|${ev.friendKey}|${ev.type}`;
-    if (!engagement[key]) {
-      engagement[key] = { ...ev, recordedAt: now };
-      added++;
+  const added = await withStoreLock(async () => {
+    const { engagement = {} } = await getStore("engagement");
+    let added = 0;
+    for (const ev of msg.events) {
+      const key = `${ev.postId}|${ev.friendKey}|${ev.type}`;
+      if (!engagement[key]) {
+        engagement[key] = { ...ev, recordedAt: now };
+        added++;
+      }
     }
-  }
-  await setStore({ engagement });
+    await setStore({ engagement });
+    return added;
+  });
 
   const job = await getJob();
   if (job && job.type === "engagementScan") {
@@ -466,6 +496,7 @@ const DEFAULT_SCHEDULE = {
   scans: ["friendScan", "engagementScan"],
   lastRunAt: 0,
   nextRunAt: 0,
+  configAt: 0, // when the user last changed the schedule — orders synced edits
 };
 
 const SCAN_TYPES = ["friendScan", "friendDatesScan", "engagementScan"];
@@ -506,11 +537,35 @@ async function ensureScheduleAlarm() {
 chrome.runtime.onInstalled.addListener(ensureScheduleAlarm);
 chrome.runtime.onStartup.addListener(ensureScheduleAlarm);
 
+// ---------------------------------------------------------------- sync
+
+FriendSync.init({
+  applySchedule,
+  isJobRunning: async () => {
+    const job = await getJob();
+    return !!(job && job.status === "running");
+  },
+  // Another browser deleted everything: stop this one's scheduled scans too.
+  afterWipe: () => chrome.alarms.clear(ALARM_AUTO),
+});
+
 // `force` is the dashboard's "Run now": it runs the configured sequence even
 // when the repeating schedule is switched off, and leaves the timer alone.
 async function runScheduledScan(force) {
   const sched = await getSchedule();
   if ((!sched.enabled && !force) || !sched.scans.length) return;
+
+  // The schedule syncs, so every signed-in browser has the same alarm. Only
+  // one should scan per interval: lastRunAt syncs too, and a run another
+  // browser started this round means this tick has nothing to do.
+  const period = sched.everyHours * 3600000;
+  if (!force && sched.lastRunAt && Date.now() - sched.lastRunAt < period * 0.9) {
+    if (sched.enabled) {
+      sched.nextRunAt = Date.now() + period;
+      await setStore({ schedule: sched });
+    }
+    return;
+  }
 
   const job = await getJob();
   if (job && job.status === "running") {
@@ -573,8 +628,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ schedule: await getSchedule() });
         break;
       case "setSchedule":
-        sendResponse({ schedule: await applySchedule(msg.schedule || {}) });
+        sendResponse({
+          schedule: await applySchedule({ ...(msg.schedule || {}), configAt: Date.now() }),
+        });
         break;
+      case "setProtected": {
+        // Stamped per friend so the newest protect/unprotect wins across
+        // browsers, rather than whichever browser saved its whole list last.
+        await withStoreLock(async () => {
+          const { friends = {} } = await getStore("friends");
+          const now = Date.now();
+          for (const k of msg.keys || []) {
+            if (!friends[k]) continue;
+            friends[k].whitelisted = !!msg.value;
+            friends[k].whitelistedAt = now;
+          }
+          await setStore({ friends });
+        });
+        sendResponse({ ok: true });
+        break;
+      }
+      case "saveSettings": {
+        // Field-level timestamps, so editing one setting here can't revert a
+        // different one just changed in another browser.
+        await withStoreLock(async () => {
+          const { settings = {} } = await getStore("settings");
+          const ts = { ...(settings._ts || {}) };
+          const now = Date.now();
+          for (const [k, v] of Object.entries(msg.patch || {})) {
+            if (k === "_ts" || settings[k] === v) continue;
+            settings[k] = v;
+            ts[k] = now;
+          }
+          settings._ts = ts;
+          await setStore({ settings });
+        });
+        sendResponse({ ok: true });
+        break;
+      }
+      case "syncNow":
+        FriendSync.syncSoon();
+        sendResponse({ ok: true });
+        break;
+      case "wipeAll": {
+        const job = await getJob();
+        if (job && job.tabId != null) sendToTab(job.tabId, { cmd: "abort" });
+        await chrome.alarms.clear(ALARM_AUTO);
+        await chrome.alarms.clear(ALARM_REMOVAL);
+        await chrome.alarms.clear(ALARM_CLEANUP);
+        await chrome.alarms.clear(ALARM_CHAIN);
+        await FriendSync.wipeEverywhere();
+        sendResponse({ ok: true });
+        break;
+      }
       case "runScheduleNow":
         await runScheduledScan(true);
         sendResponse({ ok: true });

@@ -1,14 +1,25 @@
 // FriendSweep dashboard. Reads friends + engagement events from
 // chrome.storage.local, computes per-friend scores, and drives jobs
-// via the background worker.
+// via the background worker. Edits to synced data (protection, settings,
+// wipe) go through the worker too, which stamps them for cross-browser sync.
 
 const $ = (id) => document.getElementById(id);
+
+const SETTINGS_DEFAULTS = {
+  maxRemovalsPerRun: 20,
+  removeDelayMinSec: 30,
+  removeDelayMaxSec: 60,
+  // Protected friends are ones you've already decided to keep, so they're
+  // noise in a clean-up list — hidden until you ask for them.
+  hideProtected: true,
+};
 
 let friends = {};
 let engagement = {};
 let settings = {};
 let schedule = null;
 let job = null;
+let syncState = null;
 const selected = new Set();
 
 // How long a finished job's result banner stays on screen before it clears
@@ -30,23 +41,17 @@ let lastMatchedKeys = [];
 // ------------------------------------------------------------- data
 
 async function load() {
+  // Pull from other browsers now rather than waiting for the next change.
+  chrome.runtime.sendMessage({ cmd: "syncNow" }).catch(() => {});
   const data = await chrome.storage.local.get([
-    "friends", "engagement", "settings", "job", "schedule",
+    "friends", "engagement", "settings", "job", "schedule", "syncState",
   ]);
   friends = data.friends || {};
   engagement = data.engagement || {};
-  settings = Object.assign(
-    {
-      maxRemovalsPerRun: 20,
-      removeDelayMinSec: 30,
-      removeDelayMaxSec: 60,
-      // Protected friends are ones you've already decided to keep, so they're
-      // noise in a clean-up list — hidden until you ask for them.
-      hideProtected: true,
-    },
-    data.settings || {}
-  );
+  settings = Object.assign({}, SETTINGS_DEFAULTS, data.settings || {});
   job = data.job || null;
+  syncState = data.syncState || null;
+  renderSync();
   // Ask the worker rather than trusting storage, so an unsaved schedule still
   // shows the same defaults the worker would run with.
   const resp = await chrome.runtime.sendMessage({ cmd: "getSchedule" }).catch(() => null);
@@ -68,7 +73,58 @@ function aggregates() {
     else if (ev.type === "comment") a.comments++;
     if (ev.at > a.lastAt) a.lastAt = ev.at;
   }
+  // Tallies synced from engagement scans run in other browsers.
+  for (const f of Object.values(friends)) {
+    const s = f.syncEng;
+    if (!s) continue;
+    const a = (agg[f.key] ||= { reactions: 0, comments: 0, lastAt: 0 });
+    a.reactions = Math.max(a.reactions, s[0]);
+    a.comments = Math.max(a.comments, s[1]);
+    a.lastAt = Math.max(a.lastAt, s[2]);
+  }
   return agg;
+}
+
+function hasSyncedEngagement() {
+  return Object.values(friends).some((f) => f.syncEng);
+}
+
+// Settings edits go through the worker, which timestamps each changed field.
+function saveSettings(patch) {
+  Object.assign(settings, patch);
+  return chrome.runtime.sendMessage({ cmd: "saveSettings", patch });
+}
+
+// Protection likewise: the worker stamps each friend so the newest change
+// wins across browsers. The local copy is updated now for a snappy UI.
+function setProtected(keys, value) {
+  for (const k of keys) if (friends[k]) friends[k].whitelisted = value;
+  return chrome.runtime.sendMessage({ cmd: "setProtected", keys, value });
+}
+
+function renderSync() {
+  const el = $("syncStatus");
+  const s = syncState || {};
+  el.classList.toggle("error", !!s.lastError);
+  if (s.lastError) {
+    el.textContent = "Sync paused — " + s.lastError;
+    return;
+  }
+  if (!s.lastSyncAt) {
+    el.textContent = "Connecting to browser sync…";
+    return;
+  }
+  let text = "Synced across your browsers · " + fmtWhen(s.lastSyncAt);
+  const notes = [];
+  if (s.decTruncated) notes.push(`${s.decTruncated} protect/removed marks didn't fit in browser sync`);
+  if (s.truncated) notes.push(`scan details for ${s.truncated} friends didn't fit — other browsers fill them in on their next scan`);
+  if (notes.length) {
+    text += " · " + notes.join(" · ");
+    el.title = "Chrome sync storage is capped at 100 KB per extension.";
+  } else {
+    el.title = "";
+  }
+  el.textContent = text;
 }
 
 function scoreOf(a) {
@@ -166,7 +222,7 @@ function render() {
   // "No matches" only applies once there are friends but the filters hide them.
   $("noMatch").classList.toggle("hidden", total === 0 || allRows.length > 0);
 
-  const hasEngagementData = scannedEvents > 0;
+  const hasEngagementData = scannedEvents > 0 || hasSyncedEngagement();
 
   // Clamp the page to the filtered result size, then show just that slice.
   const matched = allRows.length;
@@ -534,9 +590,7 @@ $("btnRunSchedule").addEventListener("click", async () => {
 async function toggleWhitelist(key) {
   const f = friends[key];
   if (!f) return;
-  f.whitelisted = !f.whitelisted;
-  await chrome.storage.local.set({ friends });
-  updateActionButtons();
+  setProtected([key], !f.whitelisted);
   render();
 }
 
@@ -558,9 +612,8 @@ $("btnScanEngagement").addEventListener("click", () =>
 );
 
 // Persist the chosen scan window across sessions.
-$("scanDays").addEventListener("change", async () => {
-  settings.scanDays = parseInt($("scanDays").value, 10) || 30;
-  await chrome.storage.local.set({ settings });
+$("scanDays").addEventListener("change", () => {
+  saveSettings({ scanDays: parseInt($("scanDays").value, 10) || 30 });
 });
 
 $("btnRemove").addEventListener("click", () => {
@@ -589,8 +642,7 @@ $("btnRemove").addEventListener("click", () => {
 $("btnProtect").addEventListener("click", async () => {
   const { open } = selectionSplit();
   if (!open.length) return;
-  for (const k of open) friends[k].whitelisted = true;
-  await chrome.storage.local.set({ friends });
+  setProtected(open, true);
   render();
 });
 
@@ -600,8 +652,7 @@ $("btnUnprotect").addEventListener("click", async () => {
   const { unprotectable } = selectionSplit();
   if (!unprotectable.length) return;
   if (!confirm(`Unprotect ${unprotectable.length} ${unprotectable.length === 1 ? "friend" : "friends"}?\n\nThey can be queued for removal again after this.`)) return;
-  for (const k of unprotectable) friends[k].whitelisted = false;
-  await chrome.storage.local.set({ friends });
+  setProtected(unprotectable, false);
   render();
 });
 
@@ -671,8 +722,7 @@ $("pgLast").addEventListener("click", () => { page = Infinity; render(); });
 $("pageSize").addEventListener("change", async () => {
   pageSize = parseInt($("pageSize").value, 10) || 50;
   page = 1;
-  settings.pageSize = pageSize;
-  await chrome.storage.local.set({ settings });
+  saveSettings({ pageSize });
   render();
 });
 
@@ -682,41 +732,51 @@ for (const id of ["search", "fltNoEngagement", "fltHideRemoved", "fltHideProtect
 }
 
 // Protected friends are hidden by default; remember when that's overridden.
-$("fltHideProtected").addEventListener("change", async () => {
-  settings.hideProtected = $("fltHideProtected").checked;
-  await chrome.storage.local.set({ settings });
+$("fltHideProtected").addEventListener("change", () => {
+  saveSettings({ hideProtected: $("fltHideProtected").checked });
 });
 
 $("btnSaveSettings").addEventListener("click", async () => {
-  settings.maxRemovalsPerRun = Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20);
-  settings.removeDelayMinSec = Math.max(20, parseInt($("setDelayMin").value, 10) || 30);
-  settings.removeDelayMaxSec = Math.max(
-    settings.removeDelayMinSec,
-    parseInt($("setDelayMax").value, 10) || 60
-  );
-  await chrome.storage.local.set({ settings });
+  const min = Math.max(20, parseInt($("setDelayMin").value, 10) || 30);
+  await saveSettings({
+    maxRemovalsPerRun: Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20),
+    removeDelayMinSec: min,
+    removeDelayMaxSec: Math.max(min, parseInt($("setDelayMax").value, 10) || 60),
+  });
   renderSettings();
 });
 
 $("btnWipe").addEventListener("click", async () => {
-  if (!confirm("Delete all FriendSweep data (friend list, engagement history, settings)?")) return;
-  await chrome.storage.local.clear();
+  if (!confirm("Delete all FriendSweep data (friend list, engagement history, settings)?\n\nThis also clears it from every other browser that syncs with this one.")) return;
+  await chrome.runtime.sendMessage({ cmd: "wipeAll" });
   selected.clear();
   load();
 });
 
-// Live-refresh when scans write new data.
+// Live-refresh when scans — or another browser, via sync — write new data.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+  if (changes.syncState) {
+    syncState = changes.syncState.newValue || null;
+    renderSync();
+  }
   if (changes.friends) friends = changes.friends.newValue || {};
   if (changes.engagement) engagement = changes.engagement.newValue || {};
   if (changes.job) job = changes.job.newValue || null;
-  if (changes.settings) settings = changes.settings.newValue || settings;
+  if (changes.settings) {
+    settings = Object.assign({}, SETTINGS_DEFAULTS, changes.settings.newValue || {});
+    if (settings.pageSize && settings.pageSize !== pageSize) {
+      pageSize = settings.pageSize;
+      $("pageSize").value = String(pageSize);
+    }
+    $("fltHideProtected").checked = settings.hideProtected !== false;
+    renderSettings();
+  }
   if (changes.schedule) {
     schedule = changes.schedule.newValue || null;
     renderSchedule();
   }
-  render();
+  if (changes.friends || changes.engagement || changes.job || changes.settings) render();
 });
 
 // Tick the "next removal in ~Ns" countdown.

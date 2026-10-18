@@ -10,7 +10,17 @@ A free, local Chrome extension that does what FriendFilter charges for:
 4b. **Automatic scans** — the **Automatic scans** panel at the bottom of the dashboard re-runs the scans for you: pick how often (6 hours … 1 week), which scans to include, and the engagement look-back window. Each run opens a Facebook tab, runs the chosen scans back-to-back in it, and closes it again. Removals are never automated — only the read-only scans.
 5. **Remove** — select friends in the dashboard and the extension removes the whole selection from a **single** Facebook tab: one GraphQL unfriend mutation per friend, with no per-profile page loads and no menu-clicking. Removals are still paced with randomized delays and a per-run cap (Facebook soft-blocks bursts, and there is no bulk-unfriend endpoint — each friend is its own request). If the API path can't run, it falls back to the legacy per-profile DOM flow.
 
-All data lives in `chrome.storage.local` in your browser. Nothing is uploaded anywhere.
+All data lives in `chrome.storage.local` in your browser, and is mirrored through `chrome.storage.sync` to every browser signed into the same Chrome profile (or Edge profile, with extension sync on), so each computer shows the same friends, protections, removals and settings. Nothing goes anywhere else — no server, no Google Drive.
+
+### Cross-browser sync
+
+`sync.js` (in the background worker) pushes a change about 1.5 s after it happens and pulls another browser's change the moment Chrome delivers it; the dashboard header shows the sync status. Details:
+
+- **What syncs:** protect/unprotect and removals (always, highest priority), settings, the automatic-scan schedule, and each friend's scan results — name, friend date/rank, and engagement *tallies*. Raw per-post engagement events and profile photos stay local; another browser shows the tallies and fills in photos on its own next scan.
+- **Size:** Chrome gives an extension 100 KB of sync space. Records are hashed into 12 fixed, compressed items. If a very large friend list doesn't fit, scan details for removed and least-recently-seen friends are left out of the synced copy (never out of local data), and the header says how many.
+- **Conflicts:** merges are per field, never whole-list: the newest protect/unprotect wins, a removal anywhere is a removal everywhere, settings merge field by field, tallies only grow.
+- **Scheduled scans** run on only one browser per interval: the last-run time syncs, and the others skip that round.
+- **Delete all data** clears every synced browser. It's recorded as a wipe time, so a browser that was offline drops its old copy instead of pushing it back.
 
 ## Install
 
@@ -53,6 +63,7 @@ Re-run the engagement scan every week or two — events are deduplicated per pos
 ```
 manifest.json          MV3 manifest
 background.js          Job orchestration (scans, removal queue, pacing via chrome.alarms)
+sync.js                Cross-browser sync: merges chrome.storage.local with chrome.storage.sync
 content/fb-interceptor.js  Page-context (MAIN world): captures Facebook's GraphQL auth
                            "boilerplate" and relays/sends API requests
 content/graph.js       GraphQL client (isolated world): forges friend-list, unfriend, and

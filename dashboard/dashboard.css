@@ -18,6 +18,8 @@ h1 { margin: 0; font-size: 22px; }
 
 .stats { color: #65676b; font-size: 13px; }
 .stats b { color: #1c2b33; }
+.syncstatus { margin-left: auto; color: #65676b; font-size: 12px; }
+.syncstatus.error { color: #c0392b; }
 
 .toolbar {
   display: flex;

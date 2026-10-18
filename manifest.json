@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FriendSweep",
-  "version": "1.0.0",
-  "description": "Scan your Facebook friends, measure who actually engages with you, and clean up your friend list. Free — all data stays in your browser.",
+  "version": "1.1.0",
+  "description": "Scan your Facebook friends, measure who actually engages with you, and clean up your friend list. Free — data stays in your browser and your own browser sync.",
   "permissions": ["storage", "tabs", "alarms"],
   "host_permissions": [
     "https://www.facebook.com/*",
