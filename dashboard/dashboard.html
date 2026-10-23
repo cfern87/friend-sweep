@@ -78,9 +78,8 @@
     </table>
     <div id="empty" class="empty hidden">
       No friends scanned yet. Log in to Facebook in this browser, then click
-      <strong>1 · Scan friends</strong>. A Facebook tab will open and scroll
-      through your friends list automatically — leave it alone until the
-      overlay says it's done.
+      <strong>1 · Scan friends</strong>. A Facebook tab will open and load
+      your friends list — leave it alone until the overlay says it's done.
     </div>
     <div id="noMatch" class="empty hidden">No friends match the current filters.</div>
   </section>
@@ -106,10 +105,10 @@
 
   <footer>
     <details>
-      <summary>Automatic scans</summary>
+      <summary>Scheduled scans</summary>
       <div class="settings auto">
         <label class="switch">
-          <span>Re-scan automatically</span>
+          <span>Re-scan on a schedule</span>
           <input type="checkbox" id="autoEnabled" />
         </label>
         <label>Run every
@@ -144,8 +143,8 @@
         </div>
         <p class="note">
           Scheduled runs open a Facebook tab and take focus while they scroll,
-          so pick a cadence you won't mind interrupting you. Only scans are
-          automated — friend removals always stay manual. Runs are skipped
+          so pick a cadence you won't mind interrupting you. Only scans can be
+          scheduled — removals only ever run when you start them. Runs are skipped
           while another job is going, and only fire while Chrome is open.
         </p>
       </div>
@@ -157,7 +156,7 @@
           <input type="number" id="setMaxRemovals" min="1" max="100" />
         </label>
         <label>Delay between removals (seconds, min)
-          <input type="number" id="setDelayMin" min="20" max="600" />
+          <input type="number" id="setDelayMin" min="30" max="600" />
         </label>
         <label>Delay between removals (seconds, max)
           <input type="number" id="setDelayMax" min="30" max="900" />
@@ -165,8 +164,8 @@
         <button id="btnSaveSettings">Save</button>
         <p class="note">
           Removals are paced with randomized delays (never faster than ~30s)
-          and capped per run. Automating actions is against Facebook's terms
-          of service — going too fast can get your account temporarily
+          and capped per run. Facebook's terms restrict tools like this one,
+          and going too fast can get your account temporarily
           action-blocked. Keep runs small (10–20) and spread them across days.
         </p>
         <button id="btnWipe" class="danger ghost">Delete all data (every synced browser)</button>

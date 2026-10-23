@@ -1,0 +1,3 @@
+# `npm run build` output — regenerated on every build, load it unpacked.
+build/
+node_modules/

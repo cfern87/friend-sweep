@@ -737,7 +737,7 @@ $("fltHideProtected").addEventListener("change", () => {
 });
 
 $("btnSaveSettings").addEventListener("click", async () => {
-  const min = Math.max(20, parseInt($("setDelayMin").value, 10) || 30);
+  const min = Math.max(30, parseInt($("setDelayMin").value, 10) || 30);
   await saveSettings({
     maxRemovalsPerRun: Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20),
     removeDelayMinSec: min,

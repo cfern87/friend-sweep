@@ -236,6 +236,9 @@ async function startRemoval(friendKeys) {
   // API. The content script picks the batch up through its getJob handshake, and
   // falls back to the legacy per-profile flow if the API path can't run.
   const tabId = await openJobTab(FB + "/me/friends");
+  // Same defaults and ~30s floor the dashboard shows and the legacy flow uses.
+  const minSec = Math.max(30, settings.removeDelayMinSec || 30);
+  const maxSec = Math.max(minSec, settings.removeDelayMaxSec || 60);
   await setJob({
     type: "removal",
     mode: "batch",
@@ -247,10 +250,7 @@ async function startRemoval(friendKeys) {
     failed: [],
     current: null,
     progress: { total: queue.length, done: 0, failed: 0 },
-    delays: {
-      minSec: settings.removeDelayMinSec || 20,
-      maxSec: settings.removeDelayMaxSec || 45,
-    },
+    delays: { minSec, maxSec },
   });
 }
 
@@ -338,8 +338,8 @@ async function handleRemovalResult(msg) {
 
   // Randomized human-ish pacing between removals. chrome.alarms survives
   // service-worker shutdown; minimum granularity is ~30s which suits us.
-  const minS = settings.removeDelayMinSec || 20;
-  const maxS = settings.removeDelayMaxSec || 45;
+  const minS = settings.removeDelayMinSec || 30;
+  const maxS = settings.removeDelayMaxSec || 60;
   const delaySec = Math.max(30, minS + Math.random() * (maxS - minS));
   job.nextStepAt = Date.now() + delaySec * 1000;
   await setJob(job);

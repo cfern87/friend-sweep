@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
   "name": "FriendSweep",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Scan your Facebook friends, measure who actually engages with you, and clean up your friend list. Free — data stays in your browser and your own browser sync.",
-  "permissions": ["storage", "tabs", "alarms"],
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://web.facebook.com/*"
@@ -13,15 +16,28 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
-      "js": ["content/fb-interceptor.js"],
+      "matches": [
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*"
+      ],
+      "js": [
+        "content/fb-interceptor.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
-      "js": ["content/graph.js", "content/scanner.js"],
-      "css": ["content/scanner.css"],
+      "matches": [
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*"
+      ],
+      "js": [
+        "content/graph.js",
+        "content/scanner.js"
+      ],
+      "css": [
+        "content/scanner.css"
+      ],
       "run_at": "document_idle"
     }
   ],
