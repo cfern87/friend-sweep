@@ -77,7 +77,7 @@ Note on wording: an absolute claim like "nothing in FriendSweep ever runs withou
   - Host access to `facebook.com` — reads the user's own friends list and the reactions/comments on the user's own posts, and performs removals the user selected and confirmed, inside the user's logged-in session.
 - **Remote code:** No. All code ships in the package.
 - **Data usage disclosure:** tick *Personally identifiable information* (names, profile ids) and *Website content* (reactions/comments on the user's posts). Certify: not sold, not used for unrelated purposes, not used for creditworthiness.
-- **Assets:** 128×128 icon (the current icons are placeholders), at least one 1280×800 screenshot, 440×280 promo tile.
+- **Assets:** 128×128 icon (`icons/icon128.png`, rendered from `design/icon.svg`), at least one 1280×800 screenshot, 440×280 promo tile.
 
 ## Website and listing — other things to get right
 

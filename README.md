@@ -51,6 +51,17 @@ The files that ship are listed in `SHIP` in `scripts/build.mjs`. Add any new top
 
 During development you can also load the repo folder itself — it works the same, it just carries the docs and scripts along. Reload the extension after every build.
 
+### Icons
+
+The icons are drawn as SVG in `design/` and rendered to `icons/icon{16,32,48,128}.png`:
+
+```bash
+npm install      # once — installs the SVG renderer (dev only, never shipped)
+npm run icons
+```
+
+`icon.svg` is the 128 px store icon (96 px artwork, 16 px transparent padding, as the Web Store asks); `icon-small.svg` (32/48 px) and `icon-16.svg` fill their square with bolder strokes so they stay legible in the toolbar. Commit the SVGs and the PNGs together.
+
 ### Package for the Chrome Web Store
 
 ```bash
@@ -105,8 +116,9 @@ content/scanner.js     Runs on facebook.com: GraphQL path + page-reading/unfrien
 content/scanner.css    On-page progress overlay
 dashboard/             Main UI: table, filters, scores, removal, CSV export, settings
 popup/                 Toolbar popup with quick stats
-icons/                 Placeholder icons — replace before publishing
-scripts/               build (version bump + build/), package (store zip), zip writer
+icons/                 Rendered icons (from design/ via `npm run icons`)
+design/                Icon SVG sources
+scripts/               build (version bump + build/), package (store zip), icons, zip writer
 docs/                  Publishing notes (website, privacy policy, terms)
 ```
 
