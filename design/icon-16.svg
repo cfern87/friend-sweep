@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- 16px toolbar icon: no sparkle (it turns to noise), thickest strokes. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0f5f73"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="128" height="128" rx="26" fill="url(#bg)"/>
+  <circle cx="62" cy="42" r="21" fill="#fff"/>
+  <path d="M26 100 Q26 70 62 70 Q98 70 98 100 Z" fill="#fff"/>
+  <path d="M14 114 Q80 122 118 64" fill="none" stroke="#fbbf24" stroke-width="17" stroke-linecap="round"/>
+</svg>

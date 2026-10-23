@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Store / large icon: 96px artwork with 16px transparent padding, per the
+       Chrome Web Store icon guidelines. Small sizes use icon-small.svg / icon-16.svg. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0f5f73"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="96" rx="24" fill="url(#bg)"/>
+  <circle cx="60" cy="50" r="13" fill="#fff"/>
+  <path d="M37 88 Q37 68 60 68 Q83 68 83 88 Z" fill="#fff"/>
+  <path d="M30 97 Q72 103 98 66" fill="none" stroke="#fbbf24" stroke-width="8" stroke-linecap="round"/>
+  <path d="M91 30 Q92.8 38.2 101 40 Q92.8 41.8 91 50 Q89.2 41.8 81 40 Q89.2 38.2 91 30 Z" fill="#fbbf24"/>
+</svg>

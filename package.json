@@ -1,0 +1,14 @@
+{
+  "name": "friend-sweep",
+  "version": "1.1.1",
+  "description": "FriendSweep browser extension: friend list insights and clean-up for Facebook",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/package-extension.mjs",
+    "icons": "node scripts/render-icons.mjs"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "2.6.2"
+  }
+}
