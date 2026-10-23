@@ -1,6 +1,6 @@
 {
   "name": "not-another-friend-sweeper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Not Another Friend Sweeper browser extension: friend list insights and clean-up for Facebook",
   "private": true,
   "scripts": {

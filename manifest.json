@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Not Another Friend Sweeper",
   "short_name": "Friend Sweeper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "See which Facebook friends actually engage with your posts and tidy up your friend list. Friend data stays in your browser.",
   "permissions": [
     "storage",
