@@ -42,7 +42,7 @@ button {
 }
 button:hover { filter: brightness(0.96); }
 button:disabled { opacity: 0.5; cursor: default; }
-button.primary { background: #0866ff; color: #fff; }
+button.primary { background: #127a5a; color: #fff; }
 button.danger { background: #dc3545; color: #fff; }
 button.ghost { background: transparent; border: 1px solid #ccd0d5; }
 button.danger.ghost { color: #dc3545; border-color: #dc3545; background: transparent; }
@@ -209,3 +209,81 @@ footer summary { cursor: pointer; font-weight: 600; color: #444; }
 .note { font-size: 12px; color: #8a6d00; background: #fff8e1; padding: 10px; border-radius: 6px; }
 .diag { font-size: 12px; color: #65676b; margin: 0; line-height: 1.5; }
 .diag .bad { color: #c62828; }
+
+/* ---- account / plan (Not Another Friend Sweeper) */
+.account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 24px 4px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #dfe3e8;
+  font-size: 13px;
+  color: #65676b;
+}
+.account .plan {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e4e6eb;
+  color: #1c2b33;
+}
+.account .plan.pro { background: #127a5a; color: #fff; }
+.account .usage b { color: #1c2b33; }
+.account .usage.out b { color: #c0392b; }
+.account .acctlinks { margin-left: auto; display: flex; gap: 14px; }
+.account a { color: #127a5a; font-weight: 600; text-decoration: none; }
+.account a:hover { text-decoration: underline; }
+.account a.upgrade { color: #fff; background: #127a5a; padding: 3px 10px; border-radius: 6px; }
+.protag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #127a5a;
+  color: #fff;
+  vertical-align: middle;
+}
+.pronote {
+  margin: 0 0 6px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #e8f5ef;
+  color: #0f5c44;
+  font-size: 13px;
+}
+.pronote a { color: #0f5c44; font-weight: 700; }
+.lock {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(240, 242, 245, 0.92);
+  backdrop-filter: blur(3px);
+}
+.lock.hidden,
+.account.hidden { display: none; }
+.lockcard {
+  max-width: 440px;
+  padding: 28px;
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid #dfe3e8;
+  box-shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.25);
+  text-align: center;
+}
+.lockcard h2 { margin: 0 0 8px; font-size: 20px; }
+.lockcard p { color: #65676b; margin: 0 0 18px; }
+.lockcard .note { margin: 14px 0 0; font-size: 12px; }
+.lockcard button { width: 100%; padding: 12px; }

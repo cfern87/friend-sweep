@@ -1,4 +1,4 @@
-// FriendSweep dashboard. Reads friends + engagement events from
+// Not Another Friend Sweeper dashboard. Reads friends + engagement events from
 // chrome.storage.local, computes per-friend scores, and drives jobs
 // via the background worker. Edits to synced data (protection, settings,
 // wipe) go through the worker too, which stamps them for cross-browser sync.
@@ -21,6 +21,8 @@ let schedule = null;
 let job = null;
 let syncState = null;
 let docIds = {};
+// Plan + sign-in state from the background worker (license.js).
+let account = null;
 const selected = new Set();
 
 // How long a finished job's result banner stays on screen before it clears
@@ -38,6 +40,85 @@ let lastMatched = 0;
 // Keys of every selectable row the current filter matches — not just the
 // visible page — so select-all/clear can act on the full set cheaply.
 let lastMatchedKeys = [];
+
+// ------------------------------------------------------------- account
+
+async function loadAccount(force) {
+  const resp = await chrome.runtime.sendMessage({ cmd: "getAccount", force: !!force }).catch(() => null);
+  account = (resp && resp.entitlement) || { signedIn: false };
+  renderAccount();
+}
+
+function renderAccount() {
+  const a = account || { signedIn: false };
+  $("lock").classList.toggle("hidden", !!a.signedIn);
+  $("account").classList.toggle("hidden", !a.signedIn);
+  if (!a.signedIn) return;
+
+  const plan = $("acctPlan");
+  plan.textContent = a.isPro ? "Pro" : "Free";
+  plan.classList.toggle("pro", !!a.isPro);
+  $("acctEmail").textContent = a.email || "";
+  const usage = $("acctUsage");
+  if (a.isPro) {
+    usage.textContent = "Unlimited removals" + (a.stale ? " · offline, using your last plan check" : "");
+    usage.classList.remove("out");
+  } else {
+    const left = a.removalsRemaining ?? 0;
+    const reset = a.resetsAt ? " · resets " + new Date(a.resetsAt).toLocaleDateString() : "";
+    usage.innerHTML = `<b>${left}</b> of ${a.removalsLimit ?? 40} free removals left this month${reset}`;
+    usage.classList.toggle("out", left === 0);
+  }
+  $("acctUpgrade").classList.toggle("hidden", !!a.isPro);
+
+  // Pro-only engagement windows.
+  for (const id of ["scanDays", "autoDays"]) {
+    for (const opt of $(id).options) {
+      const locked = !a.isPro && parseInt(opt.value, 10) > (a.maxScanDays || 30);
+      opt.disabled = locked;
+      opt.textContent = opt.textContent.replace(/ \(Pro\)$/, "") + (locked ? " (Pro)" : "");
+    }
+    if ($(id).selectedOptions[0] && $(id).selectedOptions[0].disabled) $(id).value = "30";
+  }
+  $("btnExport").textContent = a.csvExport ? "Export CSV" : "Export CSV (Pro)";
+  $("schedProTag").classList.toggle("hidden", !!a.scheduledScans);
+  $("schedProNote").classList.toggle("hidden", !!a.scheduledScans);
+  renderSchedule();
+}
+
+function upgradePrompt(message) {
+  if (confirm(message + "\n\nOpen the upgrade page?")) chrome.runtime.sendMessage({ cmd: "openBilling" });
+}
+
+// Send a gated command and explain a refusal (signed out / Pro-only).
+async function runCmd(msg) {
+  const resp = await chrome.runtime.sendMessage(msg).catch((e) => ({ ok: false, error: String(e) }));
+  if (resp && resp.ok === false && resp.error) {
+    if (resp.signedOut) {
+      await loadAccount();
+    } else if (resp.upgrade) {
+      upgradePrompt(resp.error);
+    } else {
+      alert(resp.error);
+    }
+  }
+  if (msg.cmd === "startRemoval") loadAccount();
+  return resp;
+}
+
+$("btnLockSignIn").addEventListener("click", () => chrome.runtime.sendMessage({ cmd: "signIn" }));
+$("acctUpgrade").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
+$("acctBilling").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
+$("acctHelp").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openSupport" }); });
+$("schedUpgrade").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
+$("acctSignOut").addEventListener("click", async (e) => {
+  e.preventDefault();
+  if (!confirm("Sign out of Not Another Friend Sweeper in this browser?\n\nYour friend data stays here.")) return;
+  await chrome.runtime.sendMessage({ cmd: "signOut" });
+  loadAccount();
+});
+// Coming back from the sign-in or billing tab: re-check the plan.
+window.addEventListener("focus", () => loadAccount(true));
 
 // ------------------------------------------------------------- data
 
@@ -591,9 +672,13 @@ function renderSchedule() {
   for (const [type, id] of Object.entries(SCAN_BOXES)) {
     $(id).checked = chosen.includes(type);
   }
-  // Every control below the switch only matters once it's on.
+  // Every control below the switch only matters once it's on, and the whole
+  // panel is Pro-only.
+  const allowed = !!(account && account.scheduledScans);
+  $("autoEnabled").disabled = !allowed;
+  $("btnRunSchedule").disabled = !allowed;
   for (const id of ["autoEvery", "autoDays", ...Object.values(SCAN_BOXES)]) {
-    $(id).disabled = !s.enabled;
+    $(id).disabled = !s.enabled || !allowed;
   }
 
   const parts = [];
@@ -610,7 +695,7 @@ async function saveSchedule() {
   const scans = Object.entries(SCAN_BOXES)
     .filter(([, id]) => $(id).checked)
     .map(([type]) => type);
-  const resp = await chrome.runtime.sendMessage({
+  const resp = await runCmd({
     cmd: "setSchedule",
     schedule: {
       enabled: $("autoEnabled").checked,
@@ -636,7 +721,7 @@ $("btnRunSchedule").addEventListener("click", async () => {
   // "Run now" honours the panel's picks even when the schedule itself is off,
   // so it doubles as a one-click way to run the whole scan sequence.
   await saveSchedule();
-  await chrome.runtime.sendMessage({ cmd: "runScheduleNow" });
+  await runCmd({ cmd: "runScheduleNow" });
 });
 
 // Whitelist a friend so they're never suggested or removed. The flag lives on
@@ -650,16 +735,12 @@ async function toggleWhitelist(key) {
 
 // ------------------------------------------------------------- actions
 
-$("btnScanFriends").addEventListener("click", () =>
-  chrome.runtime.sendMessage({ cmd: "startFriendScan" })
-);
+$("btnScanFriends").addEventListener("click", () => runCmd({ cmd: "startFriendScan" }));
 
-$("btnScanDates").addEventListener("click", () =>
-  chrome.runtime.sendMessage({ cmd: "startFriendDatesScan" })
-);
+$("btnScanDates").addEventListener("click", () => runCmd({ cmd: "startFriendDatesScan" }));
 
 $("btnScanEngagement").addEventListener("click", () =>
-  chrome.runtime.sendMessage({
+  runCmd({
     cmd: "startEngagementScan",
     days: parseInt($("scanDays").value, 10) || 30,
   })
@@ -681,11 +762,20 @@ $("btnRemove").addEventListener("click", () => {
   const preview = names.slice(0, 8).join(", ") + (names.length > 8 ? "…" : "");
   const cap = settings.maxRemovalsPerRun;
   const capNote = queue.length > cap ? ` (capped at ${cap} this run)` : "";
+  const a = account || {};
+  if (!a.isPro && (a.removalsRemaining ?? 0) === 0) {
+    upgradePrompt(`You've used all ${a.removalsLimit ?? 40} free removals this month.`);
+    return;
+  }
+  const allowanceNote =
+    !a.isPro && a.removalsRemaining < Math.min(queue.length, cap)
+      ? `\n\nFree plan: only ${a.removalsRemaining} more removals this month, so the rest of the selection will be held back.`
+      : "";
   const skipNote = skipped
     ? `\n\n${skipped} protected ${skipped === 1 ? "friend" : "friends"} in the selection will be skipped — use "Unprotect selected" first if you meant to include them.`
     : "";
-  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}\n\nThis cannot be undone by the extension.`)) return;
-  chrome.runtime.sendMessage({ cmd: "startRemoval", friendKeys: queue });
+  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}${allowanceNote}\n\nThis cannot be undone by the extension.`)) return;
+  runCmd({ cmd: "startRemoval", friendKeys: queue });
   selected.clear();
   updateActionButtons();
 });
@@ -715,6 +805,10 @@ $("btnCancel").addEventListener("click", () =>
 );
 
 $("btnExport").addEventListener("click", () => {
+  if (!account || !account.csvExport) {
+    upgradePrompt("CSV export is a Pro feature.");
+    return;
+  }
   const rows = visibleRows();
   const esc = (s) => '"' + String(s).replace(/"/g, '""') + '"';
   const csv = [
@@ -732,7 +826,7 @@ $("btnExport").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = "friendsweep.csv";
+  a.download = "not-another-friend-sweeper.csv";
   a.click();
   URL.revokeObjectURL(url);
 });
@@ -801,7 +895,7 @@ $("btnSaveSettings").addEventListener("click", async () => {
 });
 
 $("btnWipe").addEventListener("click", async () => {
-  if (!confirm("Delete all FriendSweep data (friend list, engagement history, settings)?\n\nThis also clears it from every other browser that syncs with this one.")) return;
+  if (!confirm("Delete all Not Another Friend Sweeper data (friend list, engagement history, settings)?\n\nThis also clears it from every other browser that syncs with this one.")) return;
   await chrome.runtime.sendMessage({ cmd: "wipeAll" });
   selected.clear();
   load();
@@ -810,6 +904,7 @@ $("btnWipe").addEventListener("click", async () => {
 // Live-refresh when scans — or another browser, via sync — write new data.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+  if (changes.nafsAccount || changes.nafsEntitlement) loadAccount();
   if (changes.syncState) {
     syncState = changes.syncState.newValue || null;
     renderSync();
@@ -842,4 +937,4 @@ setInterval(() => {
   if (job && job.type === "removal" && job.status === "running") renderJob();
 }, 1000);
 
-load();
+loadAccount().then(load);

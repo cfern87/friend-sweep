@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "FriendSweep",
-  "version": "1.1.1",
-  "description": "Scan your Facebook friends, measure who actually engages with you, and clean up your friend list. Free — data stays in your browser and your own browser sync.",
+  "name": "Not Another Friend Sweeper",
+  "short_name": "Friend Sweeper",
+  "version": "1.2.0",
+  "description": "See which Facebook friends actually engage with your posts and tidy up your friend list. Friend data stays in your browser.",
   "permissions": [
     "storage",
     "alarms"
@@ -11,6 +12,15 @@
     "https://www.facebook.com/*",
     "https://web.facebook.com/*"
   ],
+  "externally_connectable": {
+    "matches": [
+      "https://notanotherfriendsweeper.com/*",
+      "https://www.notanotherfriendsweeper.com/*",
+      "https://project--a16a1936-14fb-4d4b-a630-0ff28ec2b152.lovable.app/*",
+      "https://project--a16a1936-14fb-4d4b-a630-0ff28ec2b152-dev.lovable.app/*",
+      "https://id-preview--a16a1936-14fb-4d4b-a630-0ff28ec2b152.lovable.app/*"
+    ]
+  },
   "background": {
     "service_worker": "background.js"
   },
@@ -43,7 +53,7 @@
   ],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "FriendSweep",
+    "default_title": "Not Another Friend Sweeper",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"

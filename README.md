@@ -1,6 +1,15 @@
-# FriendSweep
+# Not Another Friend Sweeper (formerly FriendSweep)
 
-A free browser extension that helps you understand and tidy up your Facebook friends list:
+> **Accounts & plans (v1.2+).** The extension is locked until it is signed in to a
+> notanotherfriendsweeper.com account. `license.js` holds the session (handed over by the
+> site's `/extension-auth` page via `externally_connectable`), checks the plan at
+> `/api/public/entitlement`, and reports completed removals to `/api/public/removals`.
+> Free: 40 removals per calendar month (UTC), 1-month engagement look-back. Pro: unlimited
+> removals, 1-year look-back, scheduled scans, CSV export. Friend data still never leaves the
+> browser. When the site moves to a new domain, update `PLATFORM_URL`/`PLATFORM_ORIGINS` in
+> `license.js` and `externally_connectable` in `manifest.json` together.
+
+A browser extension that helps you understand and tidy up your Facebook friends list:
 
 1. **Scan friends** — lists every friend (name, profile link, photo, numeric id) using the same requests the Facebook page itself makes, so a full list comes back in seconds. If that path is unavailable it falls back to reading the friends page as it loads. A second pass reads the **"Recently added"** tab to record each friend's friendship-recency rank (#1 = newest friend).
 1b. **Scan friend dates** — reads your **Activity Log → Friends** category (`…/allactivity/?category_key=FRIENDS`), which lists every "became friends with …" event under a date header, and records the **real date you friended each person**.

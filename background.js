@@ -1,10 +1,10 @@
-// FriendSweep background service worker.
+// Not Another Friend Sweeper background service worker.
 // Orchestrates jobs (friend scan, engagement scan, removals) by driving a
 // Facebook tab and messaging the content script. All job state lives in
 // chrome.storage.local so the worker can be killed and revived safely.
 // sync.js mirrors that data into chrome.storage.sync across browsers.
 
-importScripts("sync.js");
+importScripts("sync.js", "license.js");
 
 const FB = "https://www.facebook.com";
 
@@ -209,13 +209,17 @@ async function startFriendDatesScan(opts) {
 }
 
 async function startEngagementScan(opts) {
+  // The look-back window is a plan feature: clamp it to what the plan allows
+  // (scheduled runs get here too, not just the dashboard button).
+  const ent = await NAFS.getEntitlement();
+  const days = Math.min((opts && opts.days) || 30, ent.maxScanDays || NAFS.FREE_MAX_SCAN_DAYS);
   const tabId = await openJobTab(FB + "/me", opts && opts.tabId);
   await setJob({
     type: "engagementScan",
     status: "running",
     tabId,
     startedAt: Date.now(),
-    days: (opts && opts.days) || 30,
+    days,
     maxPosts: 400, // hard safety cap regardless of window
     progress: { posts: 0, events: 0 },
     ...jobMeta(opts),
@@ -225,10 +229,17 @@ async function startEngagementScan(opts) {
 async function startRemoval(friendKeys) {
   const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
   const cap = settings.maxRemovalsPerRun || 20;
-  const queue = friendKeys
+  let queue = friendKeys
     .filter((k) => friends[k] && !friends[k].removedAt && !friends[k].whitelisted)
     .slice(0, cap);
-  if (!queue.length) return;
+  if (!queue.length) return { ok: false, error: "Nobody in the selection can be removed." };
+  // Free accounts have a monthly removal allowance, counted on the server.
+  const allowance = await NAFS.allowRemovals(queue.length);
+  if (!allowance.allowed) {
+    return { ok: false, error: allowance.error, upgrade: !!allowance.upgrade };
+  }
+  const trimmed = queue.length - allowance.allowed;
+  queue = queue.slice(0, allowance.allowed);
   // Batch mode: open the friends page and remove the whole selection from it via
   // GraphQL unfriend mutations — no per-friend profile navigation. The friends
   // page is used (rather than the home feed) so the friends-collection token is
@@ -251,7 +262,11 @@ async function startRemoval(friendKeys) {
     current: null,
     progress: { total: queue.length, done: 0, failed: 0 },
     delays: { minSec, maxSec },
+    ...(trimmed
+      ? { warnings: [`Free plan: ${trimmed} of your selection were held back — that's all of this month's free removals. Upgrade to Pro for unlimited removals.`] }
+      : {}),
   });
+  return { ok: true, trimmed };
 }
 
 async function removalNext() {
@@ -303,6 +318,7 @@ async function handleRemovalResult(msg) {
       if (!job.done.includes(msg.friendKey)) {
         job.done.push(msg.friendKey);
         job.progress.done++;
+        NAFS.recordRemoval();
       }
     } else {
       job.failed.push({ key: msg.friendKey, error: msg.error || "unknown" });
@@ -318,6 +334,7 @@ async function handleRemovalResult(msg) {
   if (msg.ok) {
     job.done.push(msg.friendKey);
     job.progress.done++;
+    NAFS.recordRemoval();
     await withStoreLock(async () => {
       const { friends = {} } = await getStore("friends");
       if (friends[msg.friendKey]) {
@@ -351,6 +368,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   else if (alarm.name === ALARM_CLEANUP) cleanupFinishedJob();
   else if (alarm.name === ALARM_CHAIN) runChainStep();
   else if (alarm.name === ALARM_AUTO) runScheduledScan();
+  else if (alarm.name === NAFS.ALARM) NAFS.refreshEntitlement().catch(() => {});
 });
 
 // A running job whose tab is gone can never report back, so it would otherwise
@@ -657,6 +675,8 @@ async function ensureScheduleAlarm() {
 
 chrome.runtime.onInstalled.addListener(ensureScheduleAlarm);
 chrome.runtime.onStartup.addListener(ensureScheduleAlarm);
+chrome.runtime.onInstalled.addListener(NAFS.ensureAlarm);
+chrome.runtime.onStartup.addListener(NAFS.ensureAlarm);
 
 // ---------------------------------------------------------------- sync
 
@@ -675,6 +695,14 @@ FriendSync.init({
 async function runScheduledScan(force) {
   const sched = await getSchedule();
   if ((!sched.enabled && !force) || !sched.scans.length) return;
+
+  // Scheduled scans are a Pro feature. A lapsed plan switches the timer off
+  // rather than leaving it to fire into a locked feature.
+  const ent = await NAFS.getEntitlement();
+  if (!ent.scheduledScans) {
+    if (sched.enabled && !ent.stale) await applySchedule({ enabled: false, configAt: Date.now() });
+    return;
+  }
 
   // The schedule syncs, so every signed-in browser has the same alarm. Only
   // one should scan per interval: lastRunAt syncs too, and a run another
@@ -710,9 +738,70 @@ async function runScheduledScan(force) {
 
 // ---------------------------------------------------------------- messages
 
+// Commands from the dashboard that need a signed-in account, and the plan
+// feature (if any) each one needs on top of that.
+const GATED_CMDS = {
+  startFriendScan: null,
+  startFriendDatesScan: null,
+  startEngagementScan: "maxScanDays",
+  startRemoval: null,
+  setSchedule: "scheduledScans",
+  runScheduleNow: "scheduledScans",
+};
+
+async function gate(msg, sender) {
+  // Content scripts never send these; only extension pages do.
+  if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL(""))) return null;
+  if (!(msg.cmd in GATED_CMDS)) return null;
+  const ent = await NAFS.getEntitlement();
+  if (!ent.signedIn) {
+    return { ok: false, signedOut: true, error: "Sign in to your Not Another Friend Sweeper account to use the extension." };
+  }
+  const need = GATED_CMDS[msg.cmd];
+  if (need === "scheduledScans" && !ent.scheduledScans) {
+    // Switching the schedule off is always allowed.
+    if (msg.cmd === "setSchedule" && !(msg.schedule && msg.schedule.enabled)) return null;
+    return { ok: false, upgrade: true, error: "Scheduled scans are a Pro feature." };
+  }
+  if (need === "maxScanDays" && (msg.days || 30) > ent.maxScanDays) {
+    return {
+      ok: false,
+      upgrade: true,
+      error: `Free accounts can scan back ${ent.maxScanDays} days. Upgrade to Pro to scan back up to a year.`,
+    };
+  }
+  return null;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
+    const blocked = await gate(msg, sender);
+    if (blocked) {
+      sendResponse(blocked);
+      return;
+    }
     switch (msg.cmd) {
+      // ---- account
+      case "getAccount":
+        sendResponse({ entitlement: await NAFS.getEntitlement(!!msg.force), platformUrl: NAFS.PLATFORM_URL });
+        break;
+      case "signIn":
+        NAFS.openWebSignIn();
+        sendResponse({ ok: true });
+        break;
+      case "signOut":
+        await NAFS.signOut();
+        sendResponse({ ok: true });
+        break;
+      case "openBilling":
+        chrome.tabs.create({ url: NAFS.billingUrl() });
+        sendResponse({ ok: true });
+        break;
+      case "openSupport":
+        chrome.tabs.create({ url: NAFS.supportUrl() });
+        sendResponse({ ok: true });
+        break;
+
       // ---- from the dashboard / popup
       case "startFriendScan":
         await startFriendScan();
@@ -727,8 +816,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case "startRemoval":
-        await startRemoval(msg.friendKeys || []);
-        sendResponse({ ok: true });
+        sendResponse(await startRemoval(msg.friendKeys || []));
         break;
       case "cancelJob": {
         const job = await getJob();
@@ -928,4 +1016,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })();
   return true; // keep the message channel open for the async response
+});
+
+// ---------------------------------------------------------------- sign-in handoff
+//
+// The website's /extension-auth page posts the signed-in session here after
+// the person signs in there (Google or email). Only origins listed in the
+// manifest's externally_connectable can reach this, and license.js checks the
+// sender origin again before accepting anything.
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "NAFS_PING") {
+    sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+    return;
+  }
+  if (msg.type !== "NAFS_EXTENSION_SESSION") return;
+  NAFS.adoptExternalSession(msg.payload, sender.origin).then(sendResponse);
+  return true;
 });

@@ -1,4 +1,4 @@
-// FriendSweep content script.
+// Not Another Friend Sweeper content script (FriendSweep engine).
 // Runs on facebook.com. On load it asks the background worker whether a job
 // is assigned to this tab, then executes it: scanning the friends list,
 // scanning timeline engagement, or performing a single unfriend.
@@ -28,7 +28,7 @@
       hud.className = "friendsweep-hud";
       document.documentElement.appendChild(hud);
     }
-    hud.textContent = "FriendSweep — " + text;
+    hud.textContent = "Not Another Friend Sweeper — " + text;
   }
   function hideHud() {
     if (hud) hud.remove();

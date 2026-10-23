@@ -27,6 +27,7 @@ const SHIP = [
   'manifest.json',
   'background.js',
   'sync.js',
+  'license.js',
   'content',
   'dashboard',
   'popup',

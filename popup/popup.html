@@ -4,15 +4,37 @@
   <meta charset="UTF-8" />
   <style>
     body {
-      width: 260px;
+      width: 280px;
       margin: 0;
       padding: 16px;
       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
       color: #1c2b33;
     }
-    h1 { font-size: 16px; margin: 0 0 8px; }
+    h1 { font-size: 15px; margin: 0 0 10px; }
     .stat { color: #65676b; font-size: 13px; margin-bottom: 12px; }
     .stat b { color: #1c2b33; }
+    .acct {
+      font-size: 12px;
+      color: #65676b;
+      background: #f3f5f7;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+    }
+    .acct b { color: #1c2b33; }
+    .plan {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #e4e6eb;
+      color: #1c2b33;
+      margin-right: 6px;
+    }
+    .plan.pro { background: #127a5a; color: #fff; }
     button {
       width: 100%;
       border: 0;
@@ -20,15 +42,35 @@
       padding: 10px;
       font-weight: 600;
       cursor: pointer;
-      background: #0866ff;
+      background: #127a5a;
       color: #fff;
+      margin-bottom: 8px;
     }
+    button.ghost { background: transparent; color: #127a5a; border: 1px solid #b9d9cc; }
+    .links { display: flex; justify-content: space-between; font-size: 12px; }
+    .links a { color: #127a5a; text-decoration: none; font-weight: 600; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
-  <h1>FriendSweep</h1>
-  <div class="stat" id="stat">Loading…</div>
-  <button id="open">Open dashboard</button>
+  <h1>Not Another Friend Sweeper</h1>
+
+  <div id="signedOut" class="hidden">
+    <div class="stat">Sign in with a free account to start scanning your friends list.</div>
+    <button id="signIn">Sign in or create an account</button>
+  </div>
+
+  <div id="signedIn" class="hidden">
+    <div class="acct" id="acct"></div>
+    <div class="stat" id="stat">Loading…</div>
+    <button id="open">Open dashboard</button>
+    <button id="upgrade" class="ghost hidden">Upgrade to Pro</button>
+  </div>
+
+  <div class="links">
+    <a href="#" id="help">Get help</a>
+    <a href="#" id="signOut" class="hidden">Sign out</a>
+  </div>
   <script src="popup.js"></script>
 </body>
 </html>

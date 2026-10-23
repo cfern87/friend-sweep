@@ -1,5 +1,24 @@
 # Publishing notes: store listing, website, privacy policy, terms
 
+> **v1.2 update — accounts and plans.** The extension is now Not Another Friend Sweeper and
+> requires a notanotherfriendsweeper.com account. That changes several points below; the
+> website's privacy policy and terms (notanotherfriendsweeper.com/privacy, /terms) already
+> reflect it. For the store listing:
+>
+> - **What the developer now receives:** the account email, plan/subscription status, and a
+>   monthly *count* of removals (never who). Friend and engagement data still never leaves the
+>   browser. The "developer receives nothing" bullet below no longer applies.
+> - **Network requests:** the background worker calls notanotherfriendsweeper.com
+>   (`/api/public/entitlement`, `/api/public/removals`) and the auth service to refresh the
+>   sign-in token. Both answer with CORS, so no new `host_permissions` were added.
+> - **New manifest key:** `externally_connectable` (the site's `/extension-auth` page hands the
+>   sign-in session to the extension). No new permissions.
+> - **Data usage disclosure:** additionally tick *Authentication information* (sign-in tokens)
+>   and *Personally identifiable information* (account email).
+> - **Single purpose** is unchanged; sign-in only gates it.
+> - **Free vs Pro:** Free = 40 removals per calendar month (UTC) and a 1-month engagement
+>   look-back. Pro = unlimited removals, 1-year look-back, scheduled scans, CSV export.
+
 These are the points to carry into the FriendSweep website (privacy policy, terms of use, landing page) and the Chrome Web Store / Edge Add-ons listing. They are written against what the extension actually does as of v1.1 — re-check them whenever a feature changes what data is read, stored or sent.
 
 > **Have a lawyer review the privacy policy and terms before launch.** These notes are a checklist of what the documents must cover, not legal text. Disclaimers reduce liability; they don't eliminate it, and consumer-protection law in many places limits how far they can go.

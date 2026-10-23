@@ -1,7 +1,7 @@
 {
-  "name": "friend-sweep",
-  "version": "1.1.1",
-  "description": "FriendSweep browser extension: friend list insights and clean-up for Facebook",
+  "name": "not-another-friend-sweeper",
+  "version": "1.2.0",
+  "description": "Not Another Friend Sweeper browser extension: friend list insights and clean-up for Facebook",
   "private": true,
   "scripts": {
     "build": "node scripts/build.mjs",

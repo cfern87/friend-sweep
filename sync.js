@@ -615,8 +615,11 @@ const FriendSync = (() => {
   async function wipeEverywhere() {
     const wipedAt = Date.now();
     await withStoreLock(async () => {
+      // The account sign-in isn't friend data: keep it, so wiping data
+      // doesn't also sign this browser out (license.js owns these keys).
+      const keep = typeof NAFS !== "undefined" ? await chrome.storage.local.get(NAFS.STORAGE_KEYS) : {};
       await chrome.storage.local.clear();
-      await chrome.storage.local.set({ syncState: { wipedAt } });
+      await chrome.storage.local.set({ ...keep, syncState: { wipedAt } });
     });
     const cfg = { v: FORMAT, s: {}, st: {}, w: wipedAt };
     lastWritten.set(CFG_KEY, stable(cfg));
