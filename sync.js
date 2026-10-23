@@ -30,6 +30,12 @@
 const FriendSync = (() => {
   const FORMAT = 1;
   const CFG_KEY = "fs_cfg";
+  // Facebook doc_ids learned from live traffic (see "doc_ids" in background.js).
+  // Its own small item, not part of fs_cfg: an older FriendSweep would rebuild
+  // fs_cfg without the field on every push and ping-pong with newer browsers,
+  // whereas an unknown item is simply ignored by older versions.
+  //   { v, d: { friendlyName: [docId or "" once rejected, seenAt s] } }
+  const IDS_KEY = "fs_ids";
   const DEC_KEYS = ["fs_d0", "fs_d1", "fs_d2"]; // protect / removed decisions
   const SUM_KEYS = ["fs_s0", "fs_s1", "fs_s2", "fs_s3", "fs_s4", "fs_s5", "fs_s6", "fs_s7"]; // scan results
   // QUOTA_BYTES_PER_ITEM is 8192 counting the key and the JSON value. 11 full
@@ -41,7 +47,7 @@ const FriendSync = (() => {
   const RATE_RETRY_MS = 60000;
   const STATE_REFRESH_MS = 60000;
   const ALARM_SYNC = "sync-reconcile";
-  const LOCAL_KEYS = ["friends", "engagement", "settings", "schedule"];
+  const LOCAL_KEYS = ["friends", "engagement", "settings", "schedule", "docIds"];
 
   // Synced records are positional arrays with trailing defaults trimmed off.
   //   decision: [protected 0|1, protectedAt s, removedAt s]
@@ -130,11 +136,16 @@ const FriendSync = (() => {
 
   async function readRemote() {
     const all = await chrome.storage.sync.get(null);
-    const remote = { cfg: null, items: {}, newer: false };
+    const remote = { cfg: null, ids: null, items: {}, newer: false };
     const cfg = all[CFG_KEY];
     if (cfg && typeof cfg === "object") {
       if ((cfg.v || 0) > FORMAT) remote.newer = true;
       remote.cfg = cfg;
+    }
+    const ids = all[IDS_KEY];
+    if (ids && typeof ids === "object") {
+      if ((ids.v || 0) > FORMAT) remote.newer = true;
+      else remote.ids = ids;
     }
     for (const key of [...DEC_KEYS, ...SUM_KEYS]) {
       const item = all[key];
@@ -272,6 +283,35 @@ const FriendSync = (() => {
     if (!changed) return null;
     out._ts = ts;
     return out;
+  }
+
+  // Returns the merged doc_id map, or null when nothing changed. Per name, the
+  // newer seenAt wins (a rejection is a newer entry with no id, so a dead id
+  // can't come back); on a tie the synced value wins (see mergeSummary).
+  // Local-only diagnostics (seed, staleAt, …) are kept as they are.
+  function mergeDocIds(docIds, data) {
+    const out = { ...(docIds || {}) };
+    let changed = false;
+    for (const [name, entry] of Object.entries(data || {})) {
+      if (!Array.isArray(entry) || !/^[A-Za-z0-9_]{3,120}$/.test(name)) continue;
+      const id = typeof entry[0] === "string" && /^\d{5,25}$/.test(entry[0]) ? entry[0] : null;
+      const s = Number(entry[1]) || 0;
+      if (!s) continue;
+      const cur = out[name];
+      const ls = sec(cur && cur.seenAt);
+      if (cur && (s < ls || (s === ls && (cur.docId || null) === id))) continue;
+      out[name] = { ...(cur || {}), docId: id, seenAt: toMs(s) };
+      changed = true;
+    }
+    return changed ? out : null;
+  }
+
+  function buildIds(docIds) {
+    const d = {};
+    for (const [name, e] of Object.entries(docIds || {})) {
+      if (e && sec(e.seenAt)) d[name] = [e.docId || "", sec(e.seenAt)];
+    }
+    return Object.keys(d).length ? { v: FORMAT, d } : null;
   }
 
   function scheduleConfig(s) {
@@ -420,7 +460,7 @@ const FriendSync = (() => {
 
   async function wipeLocal(wipedAt) {
     await chrome.storage.local.set({ syncState: { wipedAt } });
-    await chrome.storage.local.remove(["friends", "engagement", "settings", "schedule", "selfUrl"]);
+    await chrome.storage.local.remove(["friends", "engagement", "settings", "schedule", "selfUrl", "docIds"]);
   }
 
   async function reconcileOnce() {
@@ -452,6 +492,7 @@ const FriendSync = (() => {
         if (remote.items[k]) friendsChanged = mergeDecisions(friends, remote.items[k].data, now) || friendsChanged;
       }
       const settings = rcfg.s ? mergeSettings(got.settings, rcfg) : null;
+      const docIds = remote.ids ? mergeDocIds(got.docIds, remote.ids.d) : null;
 
       let sched = got.schedule || null;
       let schedulePatch = null;
@@ -470,6 +511,7 @@ const FriendSync = (() => {
       }
       if (friendsChanged) write.friends = friends;
       if (settings) write.settings = settings;
+      if (docIds) write.docIds = docIds;
       if (Object.keys(write).length) {
         state.lastPullAt = now;
         write.syncState = state; // marks the write as ours (see onChanged)
@@ -479,6 +521,7 @@ const FriendSync = (() => {
         friends,
         engagement: got.engagement || {},
         settings: settings || got.settings || null,
+        docIds: docIds || got.docIds || {},
         schedule: sched,
         schedulePatch,
         state,
@@ -535,6 +578,9 @@ const FriendSync = (() => {
     const cfg = buildCfg(local.settings, local.schedule, local.state);
     if (stable(cfg) !== stable(remote.cfg)) writes[CFG_KEY] = cfg;
 
+    const ids = buildIds(local.docIds);
+    if (ids && stable(ids) !== stable(remote.ids)) writes[IDS_KEY] = ids;
+
     const keys = Object.keys(writes);
     if (keys.length) {
       for (const k of keys) lastWritten.set(k, stable(writes[k]));
@@ -575,7 +621,7 @@ const FriendSync = (() => {
     const cfg = { v: FORMAT, s: {}, st: {}, w: wipedAt };
     lastWritten.set(CFG_KEY, stable(cfg));
     await chrome.storage.sync.set({ [CFG_KEY]: cfg });
-    await chrome.storage.sync.remove([...DEC_KEYS, ...SUM_KEYS]);
+    await chrome.storage.sync.remove([IDS_KEY, ...DEC_KEYS, ...SUM_KEYS]);
   }
 
   // ------------------------------------------------------------ wiring

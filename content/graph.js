@@ -15,9 +15,14 @@
 // boilerplate is ever captured (e.g. Facebook changes transports, or the
 // MAIN-world script is blocked), callers fall back to the DOM path.
 //
-// Persisted-query doc_ids drift over time. We seed known-good values but
-// prefer any doc_id we've just seen Facebook use for the same friendly_name —
-// so the client self-heals against Facebook's own live traffic.
+// Persisted-query doc_ids drift over time. For each operation we try, in order:
+//   1. the doc_id Facebook itself used on this page (live),
+//   2. the last one Facebook was seen using in any tab/browser (persisted by
+//      the background worker and shared through browser sync),
+//   3. the seed shipped with the extension.
+// A doc_id Facebook rejects as unknown raises StaleDocIdError: that id is
+// dropped and the next candidate is tried. When none is left, the caller falls
+// back to its DOM path and the job reports which operation needs an update.
 
 (() => {
   if (window.FriendSweepGraph) return;
@@ -33,8 +38,10 @@
   const log = (...a) => DEBUG && console.log("[FriendSweep/graph]", ...a);
   const warn = (...a) => console.warn("[FriendSweep/graph]", ...a);
 
-  // type -> { friendlyName, docId (seed) }. Friendly names are stable; doc_ids
-  // are seeds that get overridden by live capture when available.
+  // type -> { friendlyName, docId (seed), label }. Friendly names are stable;
+  // doc_ids are seeds that live/persisted ids override. `label` names the
+  // operation in user-facing errors. The dashboard keeps a matching label list
+  // (DOC_ID_LABELS in dashboard/dashboard.js) for its diagnostics line.
   const OPS = {
     user_friends: {
       // Facebook's own-friends list. Renamed from the generic
@@ -42,34 +49,85 @@
       // for token lookup (see FRIENDS_TOKEN_NAMES) and the doc_id self-heals.
       friendlyName: "ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery",
       docId: "27590483443942457",
+      label: "friends-list",
     },
     user_unfriend: {
       friendlyName: "FriendingCometUnfriendMutation",
       docId: "4281078165250156",
+      label: "unfriend",
     },
     user_posts: {
       friendlyName: "ProfileCometTimelineFeedRefetchQuery",
       docId: "4430909743683968",
+      label: "timeline",
     },
     user_reactions: {
       friendlyName: "CometUFIReactionsDialogTabContentRefetchQuery",
       docId: "9515494628524128",
+      label: "reactions",
     },
     user_comments: {
       friendlyName: "CometUFICommentsProviderPaginationQuery",
       docId: "4401540983249473",
+      label: "comments",
     },
   };
+  const OP_NAMES = new Set(Object.values(OPS).map((op) => op.friendlyName));
 
   const state = {
     ready: false, // MAIN-world bridge has announced itself
     boilerplate: null, // most recent Facebook GraphQL body (string)
     boilerplateAt: 0,
     actorId: null, // our own FB user id, read from the boilerplate's __user
-    docIdByName: Object.create(null), // friendlyName -> doc_id (live)
+    docIdByName: Object.create(null), // friendlyName -> doc_id (live, this page)
+    persistedDocIds: Object.create(null), // friendlyName -> doc_id (from the background)
+    rejectedDocIds: Object.create(null), // friendlyName -> Set of ids Facebook rejected
+    reportedDocIds: Object.create(null), // friendlyName -> doc_id already sent to the background
+    reportedBroken: new Set(), // op types already reported as having no usable doc_id
     tokenByName: Object.create(null), // friendlyName -> collection token (live)
     varsByName: Object.create(null), // friendlyName -> full variables template (live)
   };
+
+  // Thrown when Facebook rejects an operation's doc_id as unknown — it has
+  // retired that persisted query. Distinct from transient errors so callers
+  // don't retry the same id, and so the job can name the broken operation.
+  class StaleDocIdError extends Error {
+    constructor(type, docId, detail) {
+      const op = OPS[type];
+      super(
+        "Facebook changed its " + op.label + " request — update the extension" +
+          (detail ? " (" + detail + ")" : "")
+      );
+      this.name = "StaleDocIdError";
+      this.type = type;
+      this.friendlyName = op.friendlyName;
+      this.label = op.label;
+      this.docId = docId;
+    }
+  }
+
+  // Background messaging (isolated world only). Never throws.
+  function notifyBackground(msg) {
+    try {
+      const p = chrome.runtime.sendMessage(msg);
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {
+      /* extension reloaded underneath this page — nothing to tell */
+    }
+  }
+
+  // Remember a doc_id Facebook itself just used for one of our operations, so
+  // the next page (or another browser) starts from it. Sent once per id per
+  // page; the background skips writes when nothing changed.
+  function reportObservedDocId(friendlyName, docId) {
+    if (!OP_NAMES.has(friendlyName) || !/^\d{5,25}$/.test(docId)) return;
+    if (state.rejectedDocIds[friendlyName]) state.rejectedDocIds[friendlyName].delete(docId);
+    if (state.reportedDocIds[friendlyName] === docId) return;
+    if (state.persistedDocIds[friendlyName] === docId) return;
+    state.reportedDocIds[friendlyName] = docId;
+    const op = Object.values(OPS).find((o) => o.friendlyName === friendlyName);
+    notifyBackground({ cmd: "observedDocId", friendlyName, docId, seed: op.docId });
+  }
 
   const waiters = []; // resolvers waiting for boilerplate to arrive
   const pending = new Map(); // id -> {resolve,reject} for in-flight sends
@@ -96,6 +154,7 @@
           const known = state.docIdByName[msg.friendlyName];
           state.docIdByName[msg.friendlyName] = msg.docId;
           if (!known) log("observed live doc_id", msg.friendlyName, "=", msg.docId);
+          reportObservedDocId(msg.friendlyName, String(msg.docId));
         }
         if (msg.friendlyName && msg.collectionToken) {
           if (!state.tokenByName[msg.friendlyName])
@@ -162,9 +221,63 @@
     });
   }
 
-  function docIdFor(type) {
+  // Doc_ids to try for an operation, best first: live (this page) > persisted
+  // > seed, minus any Facebook already rejected on this page.
+  function docIdCandidates(type) {
     const op = OPS[type];
-    return state.docIdByName[op.friendlyName] || op.docId;
+    const name = op.friendlyName;
+    const rejected = state.rejectedDocIds[name];
+    const out = [];
+    const add = (docId, source) => {
+      if (!docId || (rejected && rejected.has(docId)) || out.some((c) => c.docId === docId)) return;
+      out.push({ docId, source });
+    };
+    add(state.docIdByName[name], "live");
+    add(state.persistedDocIds[name], "persisted");
+    add(op.docId, "seed");
+    return out;
+  }
+
+  function docIdFor(type) {
+    const c = docIdCandidates(type)[0];
+    return c ? c.docId : null;
+  }
+
+  // Drop a doc_id Facebook rejected: skip it for the rest of this page and
+  // tell the background, which removes it from storage (and so from sync).
+  function rejectDocId(type, docId, source) {
+    const name = OPS[type].friendlyName;
+    (state.rejectedDocIds[name] ||= new Set()).add(docId);
+    if (state.docIdByName[name] === docId) delete state.docIdByName[name];
+    if (state.persistedDocIds[name] === docId) delete state.persistedDocIds[name];
+    warn(type, "doc_id", docId, "(" + source + ") rejected by Facebook as unknown — dropping it");
+    notifyBackground({ cmd: "staleDocId", friendlyName: name, docId, seed: OPS[type].docId });
+  }
+
+  // Seed state from the background (getJob response): `docIds` maps
+  // friendlyName -> last doc_id Facebook was seen using; `rejected` maps
+  // friendlyName -> ids recently rejected (e.g. a retired seed), so a page
+  // doesn't re-send a request that is known to fail.
+  function setPersistedDocIds(docIds, rejected) {
+    for (const [name, docId] of Object.entries(docIds || {})) {
+      if (OP_NAMES.has(name) && /^\d{5,25}$/.test(String(docId))) state.persistedDocIds[name] = String(docId);
+    }
+    for (const [name, ids] of Object.entries(rejected || {})) {
+      if (!OP_NAMES.has(name) || !Array.isArray(ids)) continue;
+      const set = (state.rejectedDocIds[name] ||= new Set());
+      // Facebook's own use on this page outranks an old rejection.
+      for (const id of ids) if (id && state.docIdByName[name] !== id) set.add(String(id));
+    }
+  }
+
+  // Which source each operation would use right now (diagnostics).
+  function docIdStatus() {
+    const out = {};
+    for (const [type, op] of Object.entries(OPS)) {
+      const c = docIdCandidates(type)[0];
+      out[type] = { friendlyName: op.friendlyName, docId: c ? c.docId : null, source: c ? c.source : "none" };
+    }
+    return out;
   }
 
   function collectionToken(friendlyName) {
@@ -208,12 +321,12 @@
 
   // Clone the captured boilerplate and swap in our operation. Everything else
   // (all the auth tokens) is carried over untouched.
-  function forge(type, variables) {
+  function forge(type, variables, docId) {
     if (!state.boilerplate) throw new Error("no boilerplate captured");
     const op = OPS[type];
     const params = new URLSearchParams(state.boilerplate);
     params.set("fb_api_req_friendly_name", op.friendlyName);
-    params.set("doc_id", docIdFor(type));
+    params.set("doc_id", docId || docIdFor(type) || op.docId);
     params.set("variables", JSON.stringify(variables));
     params.set(SELF_MARK, "1"); // so the interceptor ignores our own traffic
     return params.toString();
@@ -274,23 +387,91 @@
     return out;
   }
 
-  // Send a forged operation with retry + exponential backoff, returning every
-  // JSON object in the (possibly multi-part) response. A CRITICAL error in any
-  // part throws; rate-limit errors cool down and retry.
-  async function sendForged(type, variables, { retries = 3 } = {}) {
+  // Wording Facebook could use for "no persisted query with this doc_id": a
+  // doc_id/document/persisted-query noun next to a not-found/unknown/invalid
+  // state, in either order, as words or snake_case (Facebook's server errors
+  // read like "A server error <snake_case_name> occured"). Deliberately narrow:
+  // variable errors ("missing_required_variable_value", "field … not found")
+  // must NOT match, or a bad variable would throw away a good doc_id. If
+  // Facebook's real wording turns out different, the unmatched errors are
+  // logged by sendForged — add the observed shape here.
+  const STALE_DOC_ID_RE =
+    /(?:persisted[\s_]?query|doc(?:ument)?[\s_]?id|document)[\W_]{0,3}(?:[A-Za-z0-9]+[\W_]+){0,3}?(?:not[\s_]?found|unknown|invalid|does(?:n'?t|[\s_]not)[\s_]exist|no[\s_]longer[\s_](?:exists?|valid|available)|expired|deprecated)|(?:not[\s_]?found|unknown|invalid|does(?:n'?t|[\s_]not)[\s_]exist|no[\s_]longer[\s_](?:exists?|valid|available)|expired|deprecated)[\W_]{0,3}(?:[A-Za-z0-9]+[\W_]+){0,3}?(?:persisted[\s_]?query|doc(?:ument)?[\s_]?id|document)/i;
+
+  // Error text from every error shape Facebook returns: GraphQL `errors[]`
+  // entries and the older top-level {error, errorSummary, errorDescription}.
+  function errorTexts(objects) {
+    const out = [];
+    for (const e of allErrors(objects)) {
+      out.push([e.message, e.summary, e.description, e.debug_info].filter(Boolean).join(" "));
+    }
+    for (const obj of objects) {
+      if (obj && obj.error && (obj.errorSummary || obj.errorDescription)) {
+        out.push([obj.errorSummary, obj.errorDescription].filter(Boolean).join(" "));
+      }
+    }
+    return out.filter(Boolean);
+  }
+
+  // A response is a stale-doc_id rejection only when it carries no data at all
+  // and one of its errors names the doc_id/persisted query as unknown.
+  function staleDocIdReason(objects) {
+    if (objects.some((o) => o && o.data)) return null;
+    return errorTexts(objects).find((t) => STALE_DOC_ID_RE.test(t)) || null;
+  }
+
+  // Send a forged operation, trying each doc_id candidate (live > persisted >
+  // seed) until Facebook accepts one. Returns every JSON object in the
+  // (possibly multi-part) response. A stale doc_id moves on to the next
+  // candidate; when none is left it throws StaleDocIdError (once per page and
+  // operation it also tells the background, which flags the job).
+  async function sendForged(type, variables, opts) {
     const op = OPS[type];
-    const docId = docIdFor(type);
+    for (;;) {
+      const cand = docIdCandidates(type)[0];
+      if (!cand) {
+        const err = new StaleDocIdError(type, null);
+        if (!state.reportedBroken.has(type)) {
+          state.reportedBroken.add(type);
+          warn(type, "no usable doc_id left for", op.friendlyName, "— falling back");
+          notifyBackground({ cmd: "docIdBroken", friendlyName: op.friendlyName, message: err.message });
+        }
+        throw err;
+      }
+      try {
+        return await sendWithDocId(type, variables, cand.docId, cand.source, opts);
+      } catch (e) {
+        if (!(e instanceof StaleDocIdError)) throw e;
+        rejectDocId(type, cand.docId, cand.source);
+        // loop: retry once with the next candidate, if any
+      }
+    }
+  }
+
+  // Send with one specific doc_id, with retry + exponential backoff for
+  // transient failures. A CRITICAL error in any part throws; rate-limit errors
+  // cool down and retry; a stale doc_id throws StaleDocIdError immediately.
+  async function sendWithDocId(type, variables, docId, source, { retries = 3 } = {}) {
+    const op = OPS[type];
     let attempt = 0;
     for (;;) {
       try {
-        const body = forge(type, variables);
-        log("→", type, "(" + op.friendlyName + " doc_id=" + docId + ") attempt", attempt + 1);
+        const body = forge(type, variables, docId);
+        log("→", type, "(" + op.friendlyName + " doc_id=" + docId + ", " + source + ") attempt", attempt + 1);
         const { status, text } = await rawSend(body);
         const objects = extractGluedJson(text);
 
-        // Surface any errors Facebook returned, whichever severity.
+        const staleReason = staleDocIdReason(objects);
+        if (staleReason) throw new StaleDocIdError(type, docId, staleReason.slice(0, 160));
+
+        // Surface any errors Facebook returned, whichever severity. The raw
+        // shape is logged too, so a doc_id rejection worded differently from
+        // STALE_DOC_ID_RE can be spotted and added.
         const errs = allErrors(objects);
-        if (errs.length) warn(type, "response carried", errs.length, "error(s):", errs.map((e) => e.message || e.summary || e.code).join(" | "));
+        if (errs.length) {
+          warn(type, "response carried", errs.length, "error(s):", errs.map((e) => e.message || e.summary || e.code).join(" | "));
+          log(type, "raw error(s):", JSON.stringify(errs).slice(0, 600));
+        }
 
         const crit = objects.map(criticalError).find(Boolean);
         if (crit) {
@@ -310,6 +491,7 @@
         log("←", type, "ok — HTTP", status, "-", objects.length, "object(s)");
         return objects;
       } catch (e) {
+        if (e instanceof StaleDocIdError) throw e; // retrying the same id can't help
         attempt++;
         if (attempt > retries) {
           warn(type, "failed after", retries, "retries:", (e && e.message) || e);
@@ -587,7 +769,9 @@
       return { ok: false, error: reason };
     } catch (e) {
       warn("unfriend", unfriendedUserId, "→ threw:", (e && e.message) || e);
-      return { ok: false, error: (e && e.message) || String(e) };
+      // stale: every doc_id was rejected — the caller switches to the DOM flow
+      // rather than failing each remaining friend the same way.
+      return { ok: false, error: (e && e.message) || String(e), stale: e instanceof StaleDocIdError };
     }
   }
 
@@ -914,5 +1098,8 @@
     unfriend,
     resolveProfileId,
     scanEngagement,
+    setPersistedDocIds,
+    docIdStatus,
+    isStaleDocIdError: (e) => e instanceof StaleDocIdError,
   };
 })();

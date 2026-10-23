@@ -1006,6 +1006,19 @@
         ? await G.unfriend(targetId)
         : { ok: false, error: "could not resolve a numeric profile id" };
 
+      if (res.stale) {
+        // Facebook retired the unfriend request's doc_id (and every fallback).
+        // Every remaining removal would fail the same way, so hand this friend
+        // and the rest to the per-profile page flow instead. The job already
+        // carries a note naming the operation (sent by the graph client).
+        warn("unfriend doc_id is stale — switching to per-profile removal for the remaining", friends.length - i, "friend(s)");
+        await send({ cmd: "removalFallback", warning: res.error });
+        showHud("Facebook changed its unfriend request — switching to the standard removal method…");
+        await sleep(2500);
+        hideHud();
+        return;
+      }
+
       if (res.ok) {
         done++;
         log("removed", friend.name || friend.key);
@@ -1057,6 +1070,11 @@
     // Give Facebook's SPA a moment to settle before asking for work.
     await sleep(2000);
     const resp = await send({ cmd: "getJob" });
+    // Last-known doc_ids (from earlier pages or other browsers) arrive with
+    // every getJob reply, job or not, so this page starts from them.
+    if (resp && window.FriendSweepGraph) {
+      window.FriendSweepGraph.setPersistedDocIds(resp.docIds, resp.rejectedDocIds);
+    }
     if (!resp || !resp.job) return;
     const { job } = resp;
     try {

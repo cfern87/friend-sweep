@@ -20,6 +20,7 @@ let settings = {};
 let schedule = null;
 let job = null;
 let syncState = null;
+let docIds = {};
 const selected = new Set();
 
 // How long a finished job's result banner stays on screen before it clears
@@ -44,14 +45,16 @@ async function load() {
   // Pull from other browsers now rather than waiting for the next change.
   chrome.runtime.sendMessage({ cmd: "syncNow" }).catch(() => {});
   const data = await chrome.storage.local.get([
-    "friends", "engagement", "settings", "job", "schedule", "syncState",
+    "friends", "engagement", "settings", "job", "schedule", "syncState", "docIds",
   ]);
   friends = data.friends || {};
   engagement = data.engagement || {};
   settings = Object.assign({}, SETTINGS_DEFAULTS, data.settings || {});
   job = data.job || null;
   syncState = data.syncState || null;
+  docIds = data.docIds || {};
   renderSync();
+  renderDocIdDiag();
   // Ask the worker rather than trusting storage, so an unsaved schedule still
   // shows the same defaults the worker would run with.
   const resp = await chrome.runtime.sendMessage({ cmd: "getSchedule" }).catch(() => null);
@@ -463,6 +466,13 @@ function renderJob() {
     bar.classList.add("error");
     text += ` — ${job.error || ""}`;
   }
+  // Notes from a job that finished by a slower fallback path (e.g. Facebook
+  // retired a request id). Shown like an error and left up until dismissed.
+  const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+  if (warnings.length) {
+    bar.classList.add("error");
+    text += ` — ${warnings.join("; ")}`;
+  }
   if (job.status === "finished") bar.classList.add("finished");
 
   const label = document.createElement("span");
@@ -482,7 +492,7 @@ function renderJob() {
     bar.appendChild(x);
     // Auto-dismissing a chained job would clear the job the next scan is
     // waiting on, so leave it up until the chain moves on by itself.
-    if (job.status === "finished" && !chained) scheduleJobDismiss();
+    if (job.status === "finished" && !chained && !warnings.length) scheduleJobDismiss();
   }
 }
 
@@ -510,6 +520,50 @@ function renderSettings() {
   $("setDelayMin").value = settings.removeDelayMinSec;
   $("setDelayMax").value = settings.removeDelayMaxSec;
   if (settings.scanDays) $("scanDays").value = String(settings.scanDays);
+}
+
+// ------------------------------------------------------------- diagnostics
+
+// Facebook request ids ("doc_ids") per operation, for support requests: which
+// ones run on the extension's built-in id and which on one learned from
+// Facebook's own traffic. Friendly names mirror OPS in content/graph.js.
+const DOC_ID_LABELS = [
+  ["ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery", "Friends list"],
+  ["FriendingCometUnfriendMutation", "Unfriend"],
+  ["ProfileCometTimelineFeedRefetchQuery", "Timeline"],
+  ["CometUFIReactionsDialogTabContentRefetchQuery", "Reactions"],
+  ["CometUFICommentsProviderPaginationQuery", "Comments"],
+];
+
+function docIdState(e) {
+  if (!e) return { text: "built-in" };
+  if (!e.docId && e.seedRejected && e.seedRejected === e.seed) {
+    return { text: `needs update (Facebook rejected it ${fmtWhen(e.seedRejectedAt)})`, bad: true };
+  }
+  if (e.docId && e.docId === e.seed) return { text: `built-in, confirmed ${fmtWhen(e.seenAt)}` };
+  if (e.docId) return { text: `learned ${fmtWhen(e.seenAt)}` };
+  if (e.staleAt) return { text: `built-in (learned id rejected ${fmtWhen(e.staleAt)})` };
+  return { text: "built-in" };
+}
+
+function renderDocIdDiag() {
+  const el = $("docIdDiag");
+  if (!el) return;
+  el.textContent = "Facebook request ids: ";
+  const detail = [];
+  DOC_ID_LABELS.forEach(([name, label], i) => {
+    const e = docIds[name];
+    const st = docIdState(e);
+    const span = document.createElement("span");
+    span.textContent = `${label} — ${st.text}`;
+    if (st.bad) span.className = "bad";
+    if (i) el.appendChild(document.createTextNode(" · "));
+    el.appendChild(span);
+    const id = e && e.docId ? e.docId : "built-in" + (e && e.seed ? " " + e.seed : "");
+    detail.push(name + ": " + id);
+  });
+  // Exact ids on hover, to paste into a support request.
+  el.title = detail.join("\n");
 }
 
 // ------------------------------------------------------------- schedule
@@ -759,6 +813,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.syncState) {
     syncState = changes.syncState.newValue || null;
     renderSync();
+  }
+  if (changes.docIds) {
+    docIds = changes.docIds.newValue || {};
+    renderDocIdDiag();
   }
   if (changes.friends) friends = changes.friends.newValue || {};
   if (changes.engagement) engagement = changes.engagement.newValue || {};

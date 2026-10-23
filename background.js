@@ -484,6 +484,127 @@ async function handleEngagementResult(msg) {
   }
 }
 
+// ---------------------------------------------------------------- doc_ids
+
+// Facebook's GraphQL persisted-query ids ("doc_ids") change when Facebook
+// redeploys. The content script reports the ids it sees Facebook's own pages
+// use, and ones Facebook rejects; they're kept here so every page (and, via
+// sync.js, every browser) starts from the last id known to work.
+//
+//   docIds[friendlyName] = {
+//     docId,          // last id Facebook was seen using; null once rejected
+//     seenAt,         // when docId was set (ms) — newest wins across browsers
+//     seed,           // the extension's built-in id when this was recorded
+//     staleId, staleAt,               // last learned id Facebook rejected
+//     seedRejected, seedRejectedAt,   // built-in id Facebook rejected
+//   }
+const DOC_ID_RE = /^\d{5,25}$/;
+const DOC_NAME_RE = /^[A-Za-z0-9_]{3,120}$/;
+const MAX_DOC_IDS = 20;
+// A rejected id is skipped for this long before it's tried again — long enough
+// not to send doomed requests on every page, short enough to recover from a
+// misread error.
+const REJECTED_TTL_MS = 24 * 3600000;
+
+function validDocReport(msg) {
+  return (
+    msg &&
+    typeof msg.friendlyName === "string" &&
+    DOC_NAME_RE.test(msg.friendlyName) &&
+    typeof msg.docId === "string" &&
+    DOC_ID_RE.test(msg.docId) &&
+    (msg.seed == null || (typeof msg.seed === "string" && DOC_ID_RE.test(msg.seed)))
+  );
+}
+
+// Keep the map small: drop the least recently touched names beyond the cap.
+function capDocIds(docIds) {
+  const names = Object.keys(docIds);
+  if (names.length <= MAX_DOC_IDS) return;
+  const touched = (e) => Math.max(e.seenAt || 0, e.staleAt || 0, e.seedRejectedAt || 0);
+  names.sort((a, b) => touched(docIds[a]) - touched(docIds[b]));
+  for (const n of names.slice(0, names.length - MAX_DOC_IDS)) delete docIds[n];
+}
+
+async function recordObservedDocId(msg) {
+  if (!validDocReport(msg)) return;
+  await withStoreLock(async () => {
+    const { docIds = {} } = await getStore("docIds");
+    const cur = docIds[msg.friendlyName];
+    if (cur && cur.docId === msg.docId && (cur.seed === msg.seed || !msg.seed)) return;
+    const next = { ...(cur || {}), docId: msg.docId, seed: msg.seed || (cur && cur.seed) || null };
+    // seenAt orders ids across browsers; an id we already hold keeps its stamp.
+    if (!cur || cur.docId !== msg.docId) next.seenAt = Date.now();
+    // Facebook using its own seed again clears an old rejection of it.
+    if (next.seedRejected === msg.docId) {
+      delete next.seedRejected;
+      delete next.seedRejectedAt;
+    }
+    docIds[msg.friendlyName] = next;
+    capDocIds(docIds);
+    await setStore({ docIds });
+  });
+}
+
+async function recordStaleDocId(msg) {
+  if (!validDocReport(msg)) return;
+  const now = Date.now();
+  await withStoreLock(async () => {
+    const { docIds = {} } = await getStore("docIds");
+    const cur = docIds[msg.friendlyName] || { docId: null, seenAt: 0, seed: msg.seed || null };
+    const next = { ...cur };
+    if (cur.docId === msg.docId) {
+      // A timestamped tombstone rather than a delete, so sync can't bring the
+      // dead id back from another browser's older copy.
+      next.docId = null;
+      next.seenAt = now;
+      next.staleId = msg.docId;
+      next.staleAt = now;
+    }
+    if (msg.seed && msg.docId === msg.seed) {
+      next.seed = msg.seed;
+      next.seedRejected = msg.seed;
+      next.seedRejectedAt = now;
+    }
+    if (JSON.stringify(next) === JSON.stringify(cur) && docIds[msg.friendlyName]) return;
+    docIds[msg.friendlyName] = next;
+    capDocIds(docIds);
+    await setStore({ docIds });
+  });
+}
+
+// What a page needs to pick its doc_ids: the live ones, and ids recently
+// rejected (so it doesn't resend a request known to fail).
+async function docIdsForPage() {
+  const { docIds = {} } = await getStore("docIds");
+  const now = Date.now();
+  const active = {};
+  const rejected = {};
+  for (const [name, e] of Object.entries(docIds)) {
+    if (!e) continue;
+    if (e.docId) active[name] = e.docId;
+    const bad = [];
+    if (e.seedRejected && now - (e.seedRejectedAt || 0) < REJECTED_TTL_MS) bad.push(e.seedRejected);
+    if (e.staleId && e.staleId !== e.docId && now - (e.staleAt || 0) < REJECTED_TTL_MS) bad.push(e.staleId);
+    if (bad.length) rejected[name] = bad;
+  }
+  return { docIds: active, rejectedDocIds: rejected };
+}
+
+// Every doc_id for an operation failed: the content script has fallen back to
+// its slower page path. Note it on the job so the user (and a support request)
+// can see which Facebook request changed.
+async function noteBrokenDocId(msg, sender) {
+  const job = await getJob();
+  if (!job || !sender.tab || sender.tab.id !== job.tabId) return;
+  const text = String(msg.message || "").slice(0, 200);
+  if (!text) return;
+  const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+  if (warnings.includes(text)) return;
+  job.warnings = warnings.concat(text);
+  await setJob(job);
+}
+
 // ---------------------------------------------------------------- schedule
 
 // Unattended re-scans: every `everyHours`, run `scans` in order, with
@@ -693,9 +814,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // ---- from the content script
       case "getJob": {
         // Content script asks on every page load whether it has work to do.
+        // Known doc_ids ride along either way, so any page starts from them.
+        const ids = await docIdsForPage();
         const job = await getJob();
         if (!job || job.status !== "running" || !sender.tab || sender.tab.id !== job.tabId) {
-          sendResponse({ job: null });
+          sendResponse({ job: null, ...ids });
           break;
         }
         // Remember the user's own profile URL (facebook.com/me redirects to it)
@@ -724,14 +847,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             // Hand the content script the whole queue's friend records so it can
             // remove them all from this one tab.
             const list = job.queue.map((k) => friends[k]).filter(Boolean);
-            sendResponse({ job, friends: list });
+            sendResponse({ job, friends: list, ...ids });
           } else {
             const f = friends[job.current];
-            sendResponse({ job, friend: f || null });
+            sendResponse({ job, friend: f || null, ...ids });
           }
         } else {
           const { selfUrl } = await getStore("selfUrl");
-          sendResponse({ job, selfUrl: selfUrl || null });
+          sendResponse({ job, selfUrl: selfUrl || null, ...ids });
         }
         break;
       }
@@ -763,12 +886,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const job = await getJob();
         if (job && job.type === "removal" && job.mode === "batch") {
           job.mode = "legacy";
+          // A batch can switch part-way (e.g. the unfriend doc_id went stale
+          // after some removals), so only hand on friends not yet handled.
+          const handled = new Set([...(job.done || []), ...(job.failed || []).map((f) => f.key)]);
+          job.queue = job.queue.filter((k) => !handled.has(k));
+          // Carried here as well as via docIdBroken: both rewrite the job at
+          // about the same moment, and this write must not drop the note.
+          const note = typeof msg.warning === "string" ? msg.warning.slice(0, 200) : "";
+          const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+          if (note && !warnings.includes(note)) job.warnings = warnings.concat(note);
           await setJob(job);
           await removalNext();
         }
         sendResponse({ ok: true });
         break;
       }
+      case "observedDocId":
+        if (sender.tab) await recordObservedDocId(msg);
+        sendResponse({ ok: true });
+        break;
+      case "staleDocId":
+        if (sender.tab) await recordStaleDocId(msg);
+        sendResponse({ ok: true });
+        break;
+      case "docIdBroken":
+        await noteBrokenDocId(msg, sender);
+        sendResponse({ ok: true });
+        break;
       case "jobError": {
         const job = await getJob();
         if (job) {
