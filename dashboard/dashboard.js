@@ -20,6 +20,10 @@ let settings = {};
 let schedule = null;
 let job = null;
 let syncState = null;
+// This browser's Google Drive link (sync.js `fsDrive`), and the auth details
+// the worker reports for it (drive.js).
+let drive = null;
+let driveAuth = null;
 let docIds = {};
 // Plan + sign-in state from the background worker (license.js).
 let account = null;
@@ -126,8 +130,10 @@ async function load() {
   // Pull from other browsers now rather than waiting for the next change.
   chrome.runtime.sendMessage({ cmd: "syncNow" }).catch(() => {});
   const data = await chrome.storage.local.get([
-    "friends", "engagement", "settings", "job", "schedule", "syncState", "docIds",
+    "friends", "engagement", "settings", "job", "schedule", "syncState", "docIds", "fsDrive",
   ]);
+  drive = data.fsDrive || null;
+  loadDrive();
   friends = data.friends || {};
   engagement = data.engagement || {};
   settings = Object.assign({}, SETTINGS_DEFAULTS, data.settings || {});
@@ -189,6 +195,15 @@ function setProtected(keys, value) {
 function renderSync() {
   const el = $("syncStatus");
   const s = syncState || {};
+  if (drive && drive.enabled) {
+    // Drive carries the full friend list; browser sync's caps don't apply.
+    el.title = "";
+    el.classList.toggle("error", !!drive.lastError);
+    if (drive.lastError) el.textContent = "Drive sync paused — " + drive.lastError;
+    else if (!drive.lastSyncAt) el.textContent = "Connecting to Google Drive…";
+    else el.textContent = "Synced via Google Drive · " + fmtWhen(drive.lastSyncAt);
+    return;
+  }
   el.classList.toggle("error", !!s.lastError);
   if (s.lastError) {
     el.textContent = "Sync paused — " + s.lastError;
@@ -203,13 +218,69 @@ function renderSync() {
   if (s.decTruncated) notes.push(`${s.decTruncated} protect/removed marks didn't fit in browser sync`);
   if (s.truncated) notes.push(`scan details for ${s.truncated} friends didn't fit — other browsers fill them in on their next scan`);
   if (notes.length) {
-    text += " · " + notes.join(" · ");
-    el.title = "Chrome sync storage is capped at 100 KB per extension.";
+    text += " · " + notes.join(" · ") + " · connect Google Drive to sync everything";
+    el.title = "Chrome sync storage is capped at 100 KB per extension. Google Drive sync (bottom of the page) has no such limit.";
   } else {
     el.title = "";
   }
   el.textContent = text;
 }
+
+// ------------------------------------------------------------- Google Drive
+
+async function loadDrive() {
+  const resp = await chrome.runtime.sendMessage({ cmd: "driveStatus" }).catch(() => null);
+  driveAuth = (resp && resp.status) || null;
+  renderDrive();
+}
+
+function renderDrive() {
+  const a = driveAuth || {};
+  const on = !!(drive && drive.enabled);
+  const connect = $("btnDriveConnect");
+  $("btnDriveDisconnect").classList.toggle("hidden", !on);
+  connect.textContent = on ? "Reconnect" : "Connect Google Drive";
+  connect.disabled = driveAuth ? !a.configured : false;
+
+  let info;
+  if (driveAuth && !a.configured) {
+    info = "Google Drive sync isn't set up in this build of the extension.";
+  } else if (on) {
+    info = "Connected" + (a.email ? " as " + a.email : "") +
+      ". Your whole friend list syncs through a hidden app folder in your Google Drive, " +
+      "checked for changes every minute — nothing to refresh by hand. " +
+      "Connect the same Google account on each of your browsers.";
+    if (driveAuth && !a.silentRenewal) {
+      info += " This browser renews Google access hourly through your Google sign-in; " +
+        "sign into Chrome itself for fully hands-off renewal.";
+    }
+  } else {
+    info = "Browser sync holds about 100 KB, which isn't enough for a large friend list. " +
+      "Connect Google Drive to sync any size of list between your computers. " +
+      "It only uses a hidden app folder this extension can see — not your files.";
+  }
+  $("driveInfo").textContent = info;
+
+  const diag = [];
+  if (on && drive.lastSyncAt) diag.push("Last Drive sync " + fmtWhen(drive.lastSyncAt));
+  if (on && drive.lastError) diag.push("Last error: " + drive.lastError);
+  $("driveDiag").textContent = diag.join(" · ");
+}
+
+$("btnDriveConnect").addEventListener("click", async () => {
+  const btn = $("btnDriveConnect");
+  btn.disabled = true;
+  btn.textContent = "Waiting for Google…";
+  const resp = await chrome.runtime.sendMessage({ cmd: "driveConnect" }).catch((e) => ({ ok: false, error: String(e) }));
+  if (!resp || !resp.ok) alert("Couldn't connect Google Drive: " + ((resp && resp.error) || "no response"));
+  await loadDrive();
+});
+
+$("btnDriveDisconnect").addEventListener("click", async () => {
+  if (!confirm("Stop syncing this browser through Google Drive?\n\nYour data stays here and in Drive for your other browsers.")) return;
+  await chrome.runtime.sendMessage({ cmd: "driveDisconnect" }).catch(() => {});
+  await loadDrive();
+});
 
 function scoreOf(a) {
   return a ? a.reactions + a.comments * 2 : 0;
@@ -908,6 +979,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.syncState) {
     syncState = changes.syncState.newValue || null;
     renderSync();
+  }
+  if (changes.fsDrive) {
+    drive = changes.fsDrive.newValue || null;
+    renderSync();
+    renderDrive();
   }
   if (changes.docIds) {
     docIds = changes.docIds.newValue || {};

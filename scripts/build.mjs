@@ -26,6 +26,7 @@ const outDir = join(root, 'build');
 const SHIP = [
   'manifest.json',
   'background.js',
+  'drive.js',
   'sync.js',
   'license.js',
   'content',
@@ -62,10 +63,11 @@ export function build({ bump = true } = {}) {
     cpSync(src, join(outDir, entry), { recursive: true });
   }
 
-  // background.js pulls sync.js in with importScripts, which the manifest
-  // can't see — so check it explicitly alongside the manifest's references.
+  // background.js pulls drive.js, sync.js and license.js in with
+  // importScripts, which the manifest can't see — so check them explicitly
+  // alongside the manifest's references.
   const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
-  const needed = [...referencedPaths(manifest), 'sync.js'];
+  const needed = [...referencedPaths(manifest), 'drive.js', 'sync.js', 'license.js'];
   const missing = needed.filter((p) => !existsSync(join(outDir, p)));
   if (missing.length) fail(`Manifest references files that are not in the build:\n    ${missing.join('\n    ')}`);
 

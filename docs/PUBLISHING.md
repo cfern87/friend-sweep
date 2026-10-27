@@ -19,6 +19,21 @@
 > - **Free vs Pro:** Free = 40 removals per calendar month (UTC) and a 1-month engagement
 >   look-back. Pro = unlimited removals, 1-year look-back, scheduled scans, CSV export.
 
+> **Google Drive sync update.** Users can optionally connect Google Drive to sync a large
+> friend list (see README → Google Drive sync). For the listing and privacy policy:
+>
+> - **Where it goes:** when connected, the synced friend data (names, profile ids, friend
+>   dates, engagement tallies, protect/removed marks, settings) is written to a hidden
+>   app-data folder in the user's **own** Google Drive, under Google's privacy policy. The
+>   developer still receives none of it.
+> - **New permission:** `identity` — "signs in to Google so the user's friend data can sync
+>   between their own browsers through their Google Drive." OAuth scope `drive.appdata`
+>   (plus `openid email` to show which account is connected).
+> - **Data usage disclosure:** also tick *Authentication information* (Google access tokens,
+>   held only in the browser).
+> - **Google API Services User Data Policy:** the OAuth consent screen needs a privacy
+>   policy URL, and Google's Limited Use language applies to the Drive data.
+
 These are the points to carry into the FriendSweep website (privacy policy, terms of use, landing page) and the Chrome Web Store / Edge Add-ons listing. They are written against what the extension actually does as of v1.1 — re-check them whenever a feature changes what data is read, stored or sent.
 
 > **Have a lawyer review the privacy policy and terms before launch.** These notes are a checklist of what the documents must cover, not legal text. Disclaimers reduce liability; they don't eliminate it, and consumer-protection law in many places limits how far they can go.

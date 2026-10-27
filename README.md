@@ -19,17 +19,38 @@ A browser extension that helps you understand and tidy up your Facebook friends 
 4b. **Scheduled scans** — the **Scheduled scans** panel at the bottom of the dashboard re-runs the scans you pick: choose how often (6 hours … 1 week), which scans to include, and the engagement look-back window. Each run opens a Facebook tab, runs the chosen scans back-to-back in it, and closes it again. Only the read-only scans can be scheduled — removals are never scheduled.
 5. **Remove** — select friends in the dashboard, confirm, and the extension removes that selection from a **single** Facebook tab: one unfriend request per friend, with no per-profile page loads. Removals are paced with randomized delays and a per-run cap (Facebook limits bursts, and each friend is its own request), and you can cancel at any time. If the request path can't run, it falls back to the per-profile page flow.
 
-All data lives in `chrome.storage.local` in your browser, and is mirrored through `chrome.storage.sync` to every browser signed into the same Chrome profile (or Edge profile, with extension sync on), so each computer shows the same friends, protections, removals and settings. Nothing goes anywhere else — no server, no Google Drive.
+All data lives in `chrome.storage.local` in your browser, and is mirrored through `chrome.storage.sync` to every browser signed into the same Chrome profile (or Edge profile, with extension sync on), so each computer shows the same friends, protections, removals and settings. Browser sync is capped at 100 KB, so for a large friend list (a few thousand friends) you can also **connect Google Drive** (dashboard → *Google Drive sync*): the whole list then syncs through a hidden app folder in your own Drive. Nothing goes anywhere else — no server of ours.
 
 ### Cross-browser sync
 
 `sync.js` (in the background worker) pushes a change about 1.5 s after it happens and pulls another browser's change the moment Chrome delivers it; the dashboard header shows the sync status. Details:
 
 - **What syncs:** protect/unprotect and removals (always, highest priority), settings, the scan schedule, and each friend's scan results — name, friend date/rank, and engagement *tallies*. Raw per-post engagement events and profile photos stay local; another browser shows the tallies and fills in photos on its own next scan.
-- **Size:** Chrome gives an extension 100 KB of sync space. Records are hashed into 12 fixed, compressed items. If a very large friend list doesn't fit, scan details for removed and least-recently-seen friends are left out of the synced copy (never out of local data), and the header says how many.
+- **Size:** Chrome gives an extension 100 KB of sync space. Records are hashed into 12 fixed, compressed items. If a very large friend list doesn't fit, scan details for removed and least-recently-seen friends are left out of the synced copy (never out of local data), and the header says how many. Connecting Google Drive removes the limit (below).
 - **Conflicts:** merges are per field, never whole-list: the newest protect/unprotect wins, a removal anywhere is a removal everywhere, settings merge field by field, tallies only grow.
 - **Scheduled scans** run on only one browser per interval: the last-run time syncs, and the others skip that round.
 - **Delete all data** clears every synced browser. It's recorded as a wipe time, so a browser that was offline drops its old copy instead of pushing it back.
+
+### Google Drive sync
+
+`drive.js` is a port of the CRM extension's Drive code (`ee-chrome-crm/packages/extension/src/drive.ts`). Once a browser connects Drive:
+
+- **Everything syncs, at any size.** `sync.js` writes one compressed file, `friend-sweep-sync.json`, to Drive's hidden `appDataFolder` (only this extension can see it; it's not in your Drive file list). Every friend's scan results and every protect/removed mark go in — no buckets, nothing left out. The merge rules are the same as above.
+- **Nothing to refresh by hand.** Local changes upload about 10 s after they happen (at most once a minute while a scan is running). A one-minute alarm asks Drive for the file's version — a metadata call, no download — and pulls only when another browser wrote. Opening the dashboard also syncs straight away.
+- **Sign-in renews itself.** On Chrome, `chrome.identity.getAuthToken` lets Chrome hold the Google grant and renew it with no popups, ever. On Edge (or a Chrome profile not signed into Chrome) it falls back to `launchWebAuthFlow`, renewed silently every hour from the same alarm while you're signed into Google in that browser.
+- **Browser sync keeps running** for the small part — protect/removed marks, settings, schedule, doc_ids, the wipe time — so a browser that hasn't connected Drive still gets those. Scan results go to Drive only.
+- **Connect Drive on each browser**, with the same Google account. Disconnecting leaves the Drive file in place for your other browsers. *Delete all data* clears the Drive file too.
+
+#### One-time setup (developer)
+
+The build ships with placeholder OAuth client ids, and the dashboard says Drive sync isn't set up until they're replaced. In [Google Cloud Console](https://console.cloud.google.com/) (one project for both clients — `appDataFolder` is per project, so that's what puts Chrome and Edge on the same file):
+
+1. Enable the **Google Drive API**. On the OAuth consent screen, add the scopes `drive.appdata`, `openid` and `email`.
+2. Create an OAuth client of type **Chrome Extension** with this extension's ID (the Web Store item ID). Put its client id in `manifest.json` → `oauth2.client_id`.
+3. Create an OAuth client of type **Web application** with the authorized redirect URI `https://<extension-id>.chromiumapp.org/` (trailing slash included). Put its client id in `drive.js` → `WEB_APP_CLIENT_ID`. This is the Edge fallback; without it Drive sync works on Chrome only.
+4. For unpacked development builds to have the same extension ID, add the Web Store item's public key to `manifest.json` as `"key"` (Developer Dashboard → Package → *Public key*).
+
+New permission: `identity` (no install warning). Drive's API answers with CORS, so no Google host permission is needed.
 
 ## Development
 
@@ -116,6 +137,8 @@ manifest.json          MV3 manifest (source of truth for the version)
 package.json           npm scripts: build, package
 background.js          Job orchestration (scans, removal queue, pacing via chrome.alarms)
 sync.js                Cross-browser sync: merges chrome.storage.local with chrome.storage.sync
+                       and, when connected, a file in Google Drive
+drive.js               Google sign-in and Drive requests for sync.js (ported from the CRM)
 content/fb-interceptor.js  Page context (MAIN world): picks up the request parameters
                            Facebook's own GraphQL calls carry and sends requests with them
 content/graph.js       GraphQL client (isolated world): builds friend-list, unfriend, and

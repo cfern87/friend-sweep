@@ -26,6 +26,16 @@
 //    epoch (wipedAt) every browser honours before it pushes anything.
 //  * Cross-context races. The merge into local data runs under the worker's
 //    store lock, the same one the scan handlers and dashboard edits use.
+//
+// GOOGLE DRIVE. 100 KB can't hold a large friend list (a few thousand friends
+// overflow the scan-result buckets), so a browser can also connect Google
+// Drive (drive.js). Drive then carries everything — one compressed file in the
+// hidden app-data folder, no buckets, nothing left out — under exactly the
+// same merge rules. chrome.storage.sync keeps carrying the small, important
+// part (protect/removed marks, settings, schedule, doc_ids, the wipe epoch),
+// so a browser that hasn't connected Drive still gets those. Drive has no
+// change events, so a one-minute alarm checks the file's version (a metadata
+// call, no download) and pulls only when another browser wrote.
 
 const FriendSync = (() => {
   const FORMAT = 1;
@@ -49,6 +59,20 @@ const FriendSync = (() => {
   const ALARM_SYNC = "sync-reconcile";
   const LOCAL_KEYS = ["friends", "engagement", "settings", "schedule", "docIds"];
 
+  // Google Drive (see the note at the top).
+  const DRIVE_FILE = "friend-sweep-sync.json";
+  // Local record of this browser's Drive link and health:
+  //   { enabled, fileId, version, hash, lastSyncAt, lastError }
+  // version/hash describe the Drive file as of this browser's last read or
+  // write, which is what lets a poll skip the download when nothing changed.
+  const DRIVE_KEY = "fsDrive";
+  const ALARM_DRIVE = "sync-drive-poll";
+  const DRIVE_POLL_MINUTES = 1;
+  const DRIVE_MIN_PUSH_GAP_MS = 10000;
+  // While a scan runs, results land every few seconds; upload the whole file
+  // at most once a minute meanwhile.
+  const DRIVE_JOB_GAP_MS = 60000;
+
   // Synced records are positional arrays with trailing defaults trimmed off.
   //   decision: [protected 0|1, protectedAt s, removedAt s]
   //   summary:  [name, lastSeen s, firstSeen s, friendedAt s, recentRank,
@@ -63,6 +87,7 @@ const FriendSync = (() => {
   let dueAt = 0;
   let lastPushAt = 0;
   let lastSummaryPushAt = 0;
+  let lastDrivePushAt = 0;
   // What this worker last wrote per sync key, so its own writes echoing back
   // through onChanged don't trigger another round.
   const lastWritten = new Map();
@@ -111,6 +136,11 @@ const FriendSync = (() => {
       bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
     }
     return btoa(bin);
+  }
+
+  async function sha256(str) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   async function inflate(b64) {
@@ -162,6 +192,64 @@ const FriendSync = (() => {
       }
     }
     return remote;
+  }
+
+  async function driveState() {
+    const got = await chrome.storage.local.get(DRIVE_KEY);
+    return got[DRIVE_KEY] || { enabled: false };
+  }
+
+  // Merge a patch into the Drive record. Skips the write when nothing a viewer
+  // would notice changed (lastSyncAt alone refreshes at most once a minute).
+  async function patchDrive(patch) {
+    await withStoreLock(async () => {
+      const cur = (await chrome.storage.local.get(DRIVE_KEY))[DRIVE_KEY] || { enabled: false };
+      const next = { ...cur, ...patch };
+      if (patch.lastSyncAt && cur.lastSyncAt && patch.lastSyncAt - cur.lastSyncAt < STATE_REFRESH_MS &&
+          stable({ ...next, lastSyncAt: 0 }) === stable({ ...cur, lastSyncAt: 0 })) return;
+      if (stable(next) === stable(cur)) return;
+      await chrome.storage.local.set({ [DRIVE_KEY]: next });
+    });
+  }
+
+  // Drive file: {v, z: deflate(stable JSON of {v, cfg, ids, d, s})}, where d
+  // and s are the same decision and summary records as the sync buckets, for
+  // every friend. Returns { unchanged } when the file's version is the one this
+  // browser last read or wrote — the poll's whole cost is one metadata call.
+  async function readDrive(st) {
+    if (st.fileId && st.hash) {
+      const m = await FriendDrive.getMeta(st.fileId);
+      if (m && m.version && m.version === st.version) {
+        return { unchanged: true, newer: false, primary: m, extras: [], docs: [], remoteHash: st.hash };
+      }
+    }
+    // Changed (or first read): list rather than trust the cached id, so a
+    // duplicate file from two browsers creating it at once is found and folded
+    // back into the oldest.
+    const files = await FriendDrive.listFiles(DRIVE_FILE);
+    const out = { unchanged: false, newer: false, primary: files[0] || null, extras: files.slice(1), docs: [], remoteHash: "" };
+    for (let i = 0; i < files.length; i++) {
+      const text = await FriendDrive.download(files[i].id);
+      if (text == null) continue;
+      let doc;
+      try {
+        const wrap = JSON.parse(text);
+        if ((wrap.v || 0) > FORMAT) {
+          out.newer = true;
+          continue;
+        }
+        doc = JSON.parse(await inflate(wrap.z));
+        if ((doc.v || 0) > FORMAT) {
+          out.newer = true;
+          continue;
+        }
+      } catch (e) {
+        continue; // a corrupt file reads as empty; this browser's push rewrites it
+      }
+      out.docs.push(doc);
+      if (i === 0) out.remoteHash = await sha256(stable(doc));
+    }
+    return out;
   }
 
   // ------------------------------------------------------------ merge
@@ -346,14 +434,35 @@ const FriendSync = (() => {
     return b[2] - a[2] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
   }
 
+  // [record, priority] for one friend, or null when there's nothing to sync.
+  function decisionRecord(f) {
+    if (!f.whitelisted && !f.whitelistedAt && !f.removedAt) return null;
+    const rec = trim([f.whitelisted ? 1 : 0, sec(f.whitelistedAt), sec(f.removedAt)], DEC_DEFAULTS);
+    // Active protection first, then removals, then unprotect markers.
+    const prio = (f.whitelisted ? 2e10 : f.removedAt ? 1e10 : 0) + sec(f.whitelistedAt);
+    return [rec, prio];
+  }
+
+  function summaryRecord(f, tally) {
+    const t = tally[f.key] || [0, 0, 0];
+    if (!f.name && !f.lastSeen && !t[0] && !t[1]) return null; // nothing to tell
+    const pid = f.profileId && !f.key.startsWith("id:") ? String(f.profileId) : "";
+    const rec = trim([
+      f.name || "", sec(f.lastSeen), sec(f.firstSeen), sec(f.friendedAt),
+      typeof f.recentRank === "number" ? f.recentRank : -1, pid,
+      t[0], t[1], sec(t[2]),
+    ], SUM_DEFAULTS);
+    // Current friends before removed ones; engaged before silent; then the
+    // most recently seen.
+    const prio = (f.removedAt ? 0 : 2e10) + (t[0] || t[1] ? 1e10 : 0) + sec(f.lastSeen);
+    return [rec, prio];
+  }
+
   function buildDecisions(friends) {
     const buckets = DEC_KEYS.map(() => []);
     for (const f of Object.values(friends)) {
-      if (!f.whitelisted && !f.whitelistedAt && !f.removedAt) continue;
-      const rec = trim([f.whitelisted ? 1 : 0, sec(f.whitelistedAt), sec(f.removedAt)], DEC_DEFAULTS);
-      // Active protection first, then removals, then unprotect markers.
-      const prio = (f.whitelisted ? 2e10 : f.removedAt ? 1e10 : 0) + sec(f.whitelistedAt);
-      buckets[bucketOf(f.key, DEC_KEYS.length)].push([f.key, rec, prio]);
+      const r = decisionRecord(f);
+      if (r) buckets[bucketOf(f.key, DEC_KEYS.length)].push([f.key, r[0], r[1]]);
     }
     return buckets.map((b) => b.sort(byPriority));
   }
@@ -361,20 +470,27 @@ const FriendSync = (() => {
   function buildSummaries(friends, tally) {
     const buckets = SUM_KEYS.map(() => []);
     for (const f of Object.values(friends)) {
-      const t = tally[f.key] || [0, 0, 0];
-      if (!f.name && !f.lastSeen && !t[0] && !t[1]) continue; // nothing to tell
-      const pid = f.profileId && !f.key.startsWith("id:") ? String(f.profileId) : "";
-      const rec = trim([
-        f.name || "", sec(f.lastSeen), sec(f.firstSeen), sec(f.friendedAt),
-        typeof f.recentRank === "number" ? f.recentRank : -1, pid,
-        t[0], t[1], sec(t[2]),
-      ], SUM_DEFAULTS);
-      // Current friends before removed ones; engaged before silent; then the
-      // most recently seen.
-      const prio = (f.removedAt ? 0 : 2e10) + (t[0] || t[1] ? 1e10 : 0) + sec(f.lastSeen);
-      buckets[bucketOf(f.key, SUM_KEYS.length)].push([f.key, rec, prio]);
+      const r = summaryRecord(f, tally);
+      if (r) buckets[bucketOf(f.key, SUM_KEYS.length)].push([f.key, r[0], r[1]]);
     }
     return buckets.map((b) => b.sort(byPriority));
+  }
+
+  // The whole synced state in one object, for Drive — nothing left out.
+  function buildDriveDoc(local) {
+    const d = {};
+    const s = {};
+    const tally = tallies(local.engagement, local.friends);
+    for (const f of Object.values(local.friends)) {
+      const dr = decisionRecord(f);
+      if (dr) d[f.key] = dr[0];
+      const sr = summaryRecord(f, tally);
+      if (sr) s[f.key] = sr[0];
+    }
+    const doc = { v: FORMAT, cfg: buildCfg(local.settings, local.schedule, local.state), d, s };
+    const ids = buildIds(local.docIds);
+    if (ids) doc.ids = ids;
+    return doc;
   }
 
   async function encodeBucket(key, entries) {
@@ -470,7 +586,41 @@ const FriendSync = (() => {
       await noteState({ lastError: "another browser runs a newer FriendSweep — update this one to resume syncing" });
       return;
     }
-    const rcfg = remote.cfg || {};
+
+    // Drive, when this browser has connected it. A Drive failure (offline,
+    // signed out of Google) never stops chrome.storage.sync from working.
+    const dst = await driveState();
+    let drive = null;
+    let driveError = null;
+    if (dst.enabled) {
+      try {
+        drive = await readDrive(dst);
+        if (drive.newer) {
+          driveError = "another browser runs a newer FriendSweep — update this one to resume Drive sync";
+          drive = null;
+        }
+      } catch (e) {
+        driveError = errText(e);
+      }
+    }
+
+    // Every source, in one list per kind. The merges are joins, so the order
+    // doesn't matter and folding the same data in twice is harmless.
+    const cfgs = [remote.cfg];
+    const idsList = [remote.ids && remote.ids.d];
+    const sums = SUM_KEYS.map((k) => remote.items[k] && remote.items[k].data);
+    const decs = DEC_KEYS.map((k) => remote.items[k] && remote.items[k].data);
+    for (const doc of (drive && drive.docs) || []) {
+      cfgs.push(doc.cfg);
+      idsList.push(doc.ids && doc.ids.d);
+      sums.push(doc.s);
+      decs.push(doc.d);
+    }
+    const rcfgs = cfgs.filter((c) => c && typeof c === "object");
+    const wipedAt = Math.max(0, ...rcfgs.map((c) => c.w || 0));
+    const lastRun = Math.max(0, ...rcfgs.map((c) => c.lr || 0));
+    // The schedule as most recently configured anywhere.
+    const sched0 = rcfgs.filter((c) => c.sc).sort((a, b) => (b.sct || 0) - (a.sct || 0))[0] || null;
     const now = Date.now();
 
     // 1. Pull: fold sync into local data, under the store lock so a scan
@@ -478,34 +628,41 @@ const FriendSync = (() => {
     const local = await withStoreLock(async () => {
       const got = await chrome.storage.local.get([...LOCAL_KEYS, "syncState"]);
       const state = got.syncState || {};
-      if ((rcfg.w || 0) > (state.wipedAt || 0)) {
+      if (wipedAt > (state.wipedAt || 0)) {
         // Another browser deleted everything after this one last synced.
-        await wipeLocal(rcfg.w);
+        await wipeLocal(wipedAt);
         return null;
       }
       const friends = got.friends || {};
       let friendsChanged = false;
-      for (const k of SUM_KEYS) {
-        if (remote.items[k]) friendsChanged = mergeSummary(friends, remote.items[k].data, now) || friendsChanged;
+      for (const data of sums) if (data) friendsChanged = mergeSummary(friends, data, now) || friendsChanged;
+      for (const data of decs) if (data) friendsChanged = mergeDecisions(friends, data, now) || friendsChanged;
+
+      let settings = null;
+      for (const c of rcfgs) {
+        if (!c.s) continue;
+        const m = mergeSettings(settings || got.settings, c);
+        if (m) settings = m;
       }
-      for (const k of DEC_KEYS) {
-        if (remote.items[k]) friendsChanged = mergeDecisions(friends, remote.items[k].data, now) || friendsChanged;
+      let docIds = null;
+      for (const d of idsList) {
+        if (!d) continue;
+        const m = mergeDocIds(docIds || got.docIds, d);
+        if (m) docIds = m;
       }
-      const settings = rcfg.s ? mergeSettings(got.settings, rcfg) : null;
-      const docIds = remote.ids ? mergeDocIds(got.docIds, remote.ids.d) : null;
 
       let sched = got.schedule || null;
       let schedulePatch = null;
-      if (rcfg.sc && (!sched || (rcfg.sct || 0) >= sec(sched.configAt))) {
+      if (sched0 && (!sched || (sched0.sct || 0) >= sec(sched.configAt))) {
         const mine = sched ? stable(scheduleConfig(sched)) + sec(sched.configAt) : "";
-        if (mine !== stable(rcfg.sc) + (rcfg.sct || 0)) {
-          schedulePatch = { ...rcfg.sc, configAt: toMs(rcfg.sct) };
+        if (mine !== stable(sched0.sc) + (sched0.sct || 0)) {
+          schedulePatch = { ...sched0.sc, configAt: toMs(sched0.sct) };
         }
       }
       const write = {};
-      if (rcfg.lr && rcfg.lr > sec(sched && sched.lastRunAt)) {
+      if (lastRun && lastRun > sec(sched && sched.lastRunAt)) {
         // Another browser ran the scheduled scans; this one skips its turn.
-        sched = { ...(sched || {}), lastRunAt: toMs(rcfg.lr) };
+        sched = { ...(sched || {}), lastRunAt: toMs(lastRun) };
         if (schedulePatch) schedulePatch.lastRunAt = sched.lastRunAt;
         else write.schedule = sched;
       }
@@ -537,18 +694,48 @@ const FriendSync = (() => {
       local.schedule = await hooks.applySchedule(local.schedulePatch);
     }
 
-    // 2. Push: write back whatever sync is missing.
+    // 2. Push: write back whatever each store is missing.
+    const jobRunning = hooks.isJobRunning ? await hooks.isJobRunning() : false;
+    const driveOn = !!(dst.enabled && drive);
+    // A chrome.storage.sync rejection (quota, write rate) mustn't stop the
+    // Drive push; it's re-thrown afterwards for reconcile() to record.
+    let syncErr = null;
+    try {
+      await pushSync(remote, local, jobRunning, dst.enabled);
+    } catch (e) {
+      syncErr = e;
+    }
+    if (driveOn) {
+      try {
+        await pushDrive(drive, local, jobRunning);
+      } catch (e) {
+        driveError = errText(e);
+      }
+    }
+    if (dst.enabled) {
+      if (driveError) await patchDrive({ lastError: driveError });
+      else if (drive) await patchDrive({ lastError: null, lastSyncAt: Date.now() });
+    }
+    if (syncErr) throw syncErr;
+  }
+
+  function errText(e) {
+    return String((e && e.message) || e);
+  }
+
+  async function pushSync(remote, local, jobRunning, driveOn) {
     const sinceLast = Date.now() - lastPushAt;
     if (sinceLast < MIN_PUSH_GAP_MS) {
       schedule(MIN_PUSH_GAP_MS - sinceLast);
       return;
     }
-    const jobRunning = hooks.isJobRunning ? await hooks.isJobRunning() : false;
-    const holdSummaries = jobRunning && Date.now() - lastSummaryPushAt < JOB_SUMMARY_GAP_MS;
+    // With Drive connected, scan results go to Drive only: they're what
+    // overflows 100 KB. The rest stays here for browsers without Drive.
+    const holdSummaries = driveOn || (jobRunning && Date.now() - lastSummaryPushAt < JOB_SUMMARY_GAP_MS);
 
     const writes = {};
     let decDropped = 0;
-    let sumDropped = local.state.truncated || 0;
+    let sumDropped = driveOn ? 0 : local.state.truncated || 0;
     let summariesPending = false;
 
     const dec = buildDecisions(local.friends);
@@ -562,7 +749,7 @@ const FriendSync = (() => {
 
     if (holdSummaries) {
       // A scan rewrites results every few seconds; batch them up meanwhile.
-      summariesPending = true;
+      summariesPending = !driveOn;
     } else {
       sumDropped = 0;
       const sum = buildSummaries(local.friends, tallies(local.engagement, local.friends));
@@ -591,7 +778,50 @@ const FriendSync = (() => {
     if (summariesPending) {
       schedule(Math.max(1000, JOB_SUMMARY_GAP_MS - (Date.now() - lastSummaryPushAt)));
     }
-    await noteState({ lastError: null, truncated: sumDropped, decTruncated: decDropped }, keys.length > 0);
+    // Drive carries everything, so nothing is really left out when it's on.
+    await noteState({
+      lastError: null,
+      truncated: driveOn ? 0 : sumDropped,
+      decTruncated: driveOn ? 0 : decDropped,
+    }, keys.length > 0);
+  }
+
+  // Upload the whole state to Drive when it differs from the file there. One
+  // PATCH of one file, however much changed.
+  async function pushDrive(drive, local, jobRunning) {
+    const doc = buildDriveDoc(local);
+    const json = stable(doc);
+    const hash = await sha256(json);
+    if (hash === drive.remoteHash && !drive.extras.length) {
+      if (drive.primary && !drive.unchanged) {
+        // Just read and already identical: remember it so polls stay cheap.
+        await patchDrive({ fileId: drive.primary.id, version: drive.primary.version, hash });
+      }
+      return;
+    }
+    const gap = Math.max(
+      DRIVE_MIN_PUSH_GAP_MS - (Date.now() - lastDrivePushAt),
+      jobRunning ? DRIVE_JOB_GAP_MS - (Date.now() - lastDrivePushAt) : 0
+    );
+    if (gap > 0) {
+      schedule(gap);
+      return;
+    }
+    const body = JSON.stringify({ v: FORMAT, z: await deflate(json) });
+    let m = drive.primary ? await FriendDrive.update(drive.primary.id, body) : null;
+    let created = false;
+    if (!m) {
+      m = await FriendDrive.create(DRIVE_FILE, body);
+      created = true;
+    }
+    lastDrivePushAt = Date.now();
+    // Duplicates were folded into this push; drop them.
+    for (const x of drive.extras) await FriendDrive.remove(x.id).catch(() => {});
+    // After a create, leave the hash empty so the next pass lists the folder
+    // again: another browser may have created its own file at the same moment,
+    // and that pass merges the two.
+    await patchDrive({ fileId: m.id, version: m.version, hash: created ? "" : hash });
+    if (created) schedule(DRIVE_MIN_PUSH_GAP_MS);
   }
 
   // Record sync health for the dashboard. Skips the write when nothing a
@@ -614,17 +844,76 @@ const FriendSync = (() => {
   // the buckets vanish already knows not to push its old copy back.
   async function wipeEverywhere() {
     const wipedAt = Date.now();
+    const dst = await driveState();
     await withStoreLock(async () => {
-      // The account sign-in isn't friend data: keep it, so wiping data
-      // doesn't also sign this browser out (license.js owns these keys).
-      const keep = typeof NAFS !== "undefined" ? await chrome.storage.local.get(NAFS.STORAGE_KEYS) : {};
+      // The account sign-in and the Drive connection aren't friend data: keep
+      // them, so wiping data doesn't also sign this browser out (license.js
+      // and drive.js own those keys).
+      const keepKeys = [
+        ...(typeof NAFS !== "undefined" ? NAFS.STORAGE_KEYS : []),
+        ...FriendDrive.STORAGE_KEYS,
+      ];
+      const keep = await chrome.storage.local.get(keepKeys);
       await chrome.storage.local.clear();
-      await chrome.storage.local.set({ ...keep, syncState: { wipedAt } });
+      await chrome.storage.local.set({
+        ...keep,
+        syncState: { wipedAt },
+        // Same file, but its content is about to be replaced.
+        [DRIVE_KEY]: { enabled: !!dst.enabled, fileId: dst.fileId || "", version: "", hash: "" },
+      });
     });
     const cfg = { v: FORMAT, s: {}, st: {}, w: wipedAt };
     lastWritten.set(CFG_KEY, stable(cfg));
     await chrome.storage.sync.set({ [CFG_KEY]: cfg });
     await chrome.storage.sync.remove([IDS_KEY, ...DEC_KEYS, ...SUM_KEYS]);
+    if (dst.enabled) {
+      try {
+        const body = JSON.stringify({ v: FORMAT, z: await deflate(stable({ v: FORMAT, cfg, d: {}, s: {} })) });
+        const files = await FriendDrive.listFiles(DRIVE_FILE);
+        if (files.length) {
+          await FriendDrive.update(files[0].id, body);
+          for (const x of files.slice(1)) await FriendDrive.remove(x.id).catch(() => {});
+        } else {
+          await FriendDrive.create(DRIVE_FILE, body);
+        }
+      } catch (e) {
+        // The next reconcile pushes the wipe epoch (it's in local state now).
+        await patchDrive({ lastError: errText(e) });
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ Drive connect
+
+  async function ensureDrivePoll(enabled) {
+    if (!enabled) {
+      await chrome.alarms.clear(ALARM_DRIVE);
+      return;
+    }
+    if (!(await chrome.alarms.get(ALARM_DRIVE))) {
+      chrome.alarms.create(ALARM_DRIVE, { periodInMinutes: DRIVE_POLL_MINUTES });
+    }
+  }
+
+  async function driveConnect() {
+    const res = await FriendDrive.connect();
+    if (!res.ok) return res;
+    // Fresh link: forget any file state from an earlier connection.
+    await patchDrive({ enabled: true, fileId: "", version: "", hash: "", lastError: null });
+    await ensureDrivePoll(true);
+    schedule(0);
+    return res;
+  }
+
+  async function driveDisconnect() {
+    await patchDrive({ enabled: false, lastError: null });
+    await ensureDrivePoll(false);
+    await FriendDrive.disconnect();
+    return { ok: true };
+  }
+
+  async function driveStatus() {
+    return { ...(await FriendDrive.authState()), ...(await driveState()) };
   }
 
   // ------------------------------------------------------------ wiring
@@ -650,6 +939,8 @@ const FriendSync = (() => {
       // between a change and its debounced push).
       chrome.alarms.create(ALARM_SYNC, { periodInMinutes: 5 });
     }
+    // Alarms are cleared when the extension updates; re-arm the Drive poll.
+    await ensureDrivePoll((await driveState()).enabled);
     schedule(0);
   }
 
@@ -659,10 +950,22 @@ const FriendSync = (() => {
     chrome.storage.onChanged.addListener(onChanged);
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === ALARM_SYNC) schedule(0);
+      else if (alarm.name === ALARM_DRIVE) {
+        // Renew the Google token on a schedule (matters on the hourly fallback
+        // path), then check Drive for another browser's write.
+        FriendDrive.ensureFreshToken().catch(() => {}).finally(() => schedule(0));
+      }
     });
     chrome.runtime.onInstalled.addListener(kick);
     chrome.runtime.onStartup.addListener(kick);
   }
 
-  return { init, wipeEverywhere, syncSoon: () => schedule(0) };
+  return {
+    init,
+    wipeEverywhere,
+    syncSoon: () => schedule(0),
+    driveConnect,
+    driveDisconnect,
+    driveStatus,
+  };
 })();

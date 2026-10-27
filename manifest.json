@@ -6,12 +6,21 @@
   "description": "See which Facebook friends actually engage with your posts and tidy up your friend list. Friend data stays in your browser.",
   "permissions": [
     "storage",
-    "alarms"
+    "alarms",
+    "identity"
   ],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://web.facebook.com/*"
   ],
+  "oauth2": {
+    "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive.appdata",
+      "openid",
+      "email"
+    ]
+  },
   "externally_connectable": {
     "matches": [
       "https://notanotherfriendsweeper.com/*",

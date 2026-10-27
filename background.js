@@ -2,9 +2,10 @@
 // Orchestrates jobs (friend scan, engagement scan, removals) by driving a
 // Facebook tab and messaging the content script. All job state lives in
 // chrome.storage.local so the worker can be killed and revived safely.
-// sync.js mirrors that data into chrome.storage.sync across browsers.
+// sync.js mirrors that data into chrome.storage.sync across browsers, and into
+// Google Drive (drive.js) on browsers that connected it.
 
-importScripts("sync.js", "license.js");
+importScripts("drive.js", "sync.js", "license.js");
 
 const FB = "https://www.facebook.com";
 
@@ -878,6 +879,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "syncNow":
         FriendSync.syncSoon();
         sendResponse({ ok: true });
+        break;
+      // Google Drive sync (drive.js / sync.js). Connect opens Google's consent
+      // the first time; after that tokens renew without the user.
+      case "driveConnect":
+        sendResponse(await FriendSync.driveConnect());
+        break;
+      case "driveDisconnect":
+        sendResponse(await FriendSync.driveDisconnect());
+        break;
+      case "driveStatus":
+        sendResponse({ ok: true, status: await FriendSync.driveStatus() });
         break;
       case "wipeAll": {
         const job = await getJob();
