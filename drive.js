@@ -39,7 +39,7 @@ const FriendDrive = (() => {
   // It can't live in the manifest: oauth2.client_id is read by getAuthToken,
   // which needs the "Chrome Extension" client. Its Authorized redirect URIs
   // must include https://<extension-id>.chromiumapp.org/ (trailing slash).
-  const WEB_APP_CLIENT_ID = "YOUR_GOOGLE_OAUTH_CLIENT_ID_WEB";
+  const WEB_APP_CLIENT_ID = "1032202235413-6rfvu7gipfp89hvfg4pd2ck5bne5g3iq.apps.googleusercontent.com";
 
   // `openid email` lets us learn the account, and login_hint is what stops a
   // silent renewal failing on a browser signed into several Google accounts.

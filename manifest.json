@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Not Another Friend Sweeper",
   "short_name": "Friend Sweeper",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "See which Facebook friends actually engage with your posts and tidy up your friend list. Friend data stays in your browser.",
   "permissions": [
     "storage",
@@ -14,7 +14,7 @@
     "https://web.facebook.com/*"
   ],
   "oauth2": {
-    "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "1032202235413-uqugb89jpkm27uv07vmiof8s0vekvg93.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/drive.appdata",
       "openid",
