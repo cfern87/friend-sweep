@@ -9,6 +9,7 @@ const SETTINGS_DEFAULTS = {
   maxRemovalsPerRun: 20,
   removeDelayMinSec: 30,
   removeDelayMaxSec: 60,
+  maxRemovalsPerDay: 40,
   // Protected friends are ones you've already decided to keep, so they're
   // noise in a clean-up list — hidden until you ask for them.
   hideProtected: true,
@@ -44,6 +45,8 @@ let lastMatched = 0;
 // Keys of every selectable row the current filter matches — not just the
 // visible page — so select-all/clear can act on the full set cheaply.
 let lastMatchedKeys = [];
+// { at, days } of the last finished engagement scan — for "why suggested".
+let lastEngagementScan = null;
 
 // ------------------------------------------------------------- account
 
@@ -136,7 +139,7 @@ async function load() {
   // Pull from other browsers now rather than waiting for the next change.
   chrome.runtime.sendMessage({ cmd: "syncNow" }).catch(() => {});
   const data = await chrome.storage.local.get([
-    "friends", "engagement", "settings", "job", "schedule", "syncState", "docIds", "fsDrive",
+    "friends", "engagement", "settings", "job", "schedule", "syncState", "docIds", "fsDrive", "lastEngagementScan",
   ]);
   drive = data.fsDrive || null;
   loadDrive();
@@ -146,6 +149,7 @@ async function load() {
   job = data.job || null;
   syncState = data.syncState || null;
   docIds = data.docIds || {};
+  lastEngagementScan = data.lastEngagementScan || null;
   renderSync();
   renderDocIdDiag();
   // Ask the worker rather than trusting storage, so an unsaved schedule still
@@ -298,7 +302,7 @@ function fmtDate(ts) {
   return ts ? new Date(ts).toLocaleDateString() : "—";
 }
 
-function visibleRows() {
+function visibleRows(opts = {}) {
   const agg = aggregates();
   const q = $("search").value.trim().toLowerCase();
   const noEng = $("fltNoEngagement").checked;
@@ -334,11 +338,13 @@ function visibleRows() {
     };
   });
 
-  if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q));
-  if ($("fltFailed").checked) rows = rows.filter((r) => r.removeFailed);
-  if (noEng) rows = rows.filter((r) => r.score === 0);
-  if (hideRemoved) rows = rows.filter((r) => !r.removedAt);
-  if (hideProtected) rows = rows.filter((r) => !r.whitelisted);
+  if (!opts.ignoreFilters) {
+    if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q));
+    if ($("fltFailed").checked) rows = rows.filter((r) => r.removeFailed);
+    if (noEng) rows = rows.filter((r) => r.score === 0);
+    if (hideRemoved) rows = rows.filter((r) => !r.removedAt);
+    if (hideProtected) rows = rows.filter((r) => !r.whitelisted);
+  }
 
   rows.sort((x, y) => {
     // Rows without a friend-order rank sort last in the friended-* modes.
@@ -445,6 +451,13 @@ function render() {
     a.textContent = r.name;
     if (r.nameIsFallback) a.title = "Name not captured yet — re-run “Scan friends” to fill it in";
     tdName.appendChild(a);
+    // Say why someone is suggested: a bare 0 reads like a verdict on the person.
+    if (hasEngagementData && r.score === 0 && !r.removedAt && !r.whitelisted) {
+      const why = document.createElement("div");
+      why.className = "why";
+      why.textContent = whySuggested(r);
+      tdName.appendChild(why);
+    }
 
     const tdR = document.createElement("td");
     tdR.textContent = r.reactions;
@@ -504,6 +517,11 @@ function render() {
   }
 
   renderPager(matched, start, rows.length, pages);
+  renderChecklist();
+  renderDailyMeter();
+  const navCount = $("navFriendsCount");
+  navCount.textContent = failedCount ? `${failedCount} to fix` : total ? String(total - removed) : "";
+  navCount.classList.toggle("alert", failedCount > 0);
   renderJob();
   updateActionButtons();
   updateSelAllState();
@@ -585,12 +603,17 @@ function updateActionButtons() {
 
   const btn = $("btnRemove");
   btn.textContent = `Remove selected (${open.length})`;
-  btn.disabled = open.length === 0 || (job && job.status === "running");
+  btn.disabled = open.length === 0 || jobIsActive();
 
   // Protect/unprotect are local storage changes, so they're fine mid-job.
   const pBtn = $("btnProtect");
   pBtn.textContent = `Protect selected (${open.length})`;
   pBtn.disabled = open.length === 0;
+
+  const crm = $("btnToCrm");
+  const live = open.length + unprotectable.length;
+  crm.textContent = `Send to CRM (${live})`;
+  crm.disabled = live === 0;
 
   const uBtn = $("btnUnprotect");
   uBtn.textContent = `Unprotect selected (${unprotectable.length})`;
@@ -639,6 +662,7 @@ function failedRemovalCell(r) {
 
 // Jump the list to just the people a removal couldn't get to.
 function showFailedRemovals() {
+  if (location.hash !== "#friends") location.hash = "#friends";
   $("fltFailed").checked = true;
   $("fltHideRemoved").checked = true;
   $("search").value = "";
@@ -683,8 +707,12 @@ function renderJob() {
     bar.textContent = "";
     return;
   }
-  bar.classList.remove("hidden", "error", "finished");
+  bar.classList.remove("hidden", "error", "finished", "queued");
   bar.textContent = "";
+  if (job.status === "queued") {
+    renderQueuedRemoval(bar);
+    return;
+  }
   const p = job.progress || {};
   const trigger = job.trigger || (job.auto ? "schedule" : "manual");
   let text = (TRIGGER_LABELS[trigger] || "") + jobHeadline(job);
@@ -703,7 +731,9 @@ function renderJob() {
   // retired a request id). Shown like an error and left up until dismissed.
   const warnings = Array.isArray(job.warnings) ? job.warnings : [];
   if (warnings.length) {
-    bar.classList.add("error");
+    // Notes on a running job (e.g. some held back for tomorrow) are information;
+    // once it has ended, they're what to read first.
+    if (!running) bar.classList.add("error");
     text += ` — ${warnings.join("; ")}`;
   }
   // A removal that left people behind isn't a green "all done".
@@ -728,6 +758,15 @@ function renderJob() {
     failBar.style.width = `${(100 * (p.failed || 0)) / p.total}%`;
     track.append(doneBar, failBar);
     body.appendChild(track);
+    if (running) {
+      // Make the safety rules visible while they're working.
+      const d = job.delays || {};
+      const pace = document.createElement("div");
+      pace.className = "jobpacing";
+      const { today, cap } = dailyUsage();
+      pace.textContent = `Paced ${d.minSec || 30}–${d.maxSec || 60}s apart, like a person would · ${today} of ${cap} removals today`;
+      body.appendChild(pace);
+    }
   }
   bar.appendChild(body);
 
@@ -798,6 +837,7 @@ function scheduleJobDismiss() {
 
 function renderSettings() {
   $("setMaxRemovals").value = settings.maxRemovalsPerRun;
+  $("setMaxPerDay").value = settings.maxRemovalsPerDay;
   $("setDelayMin").value = settings.removeDelayMinSec;
   $("setDelayMax").value = settings.removeDelayMaxSec;
   if (settings.scanDays) $("scanDays").value = String(settings.scanDays);
@@ -952,18 +992,38 @@ $("btnRemove").addEventListener("click", () => {
   // Protected friends can sit in the selection, but protection still wins:
   // they're held back here and again in the background worker.
   const { open: queue, unprotectable } = selectionSplit();
-  if (!queue.length) return;
-  const skipped = unprotectable.length;
+  if (confirmAndRemove(queue, unprotectable.length)) {
+    selected.clear();
+    updateActionButtons();
+  }
+});
 
-  const names = queue.map((k) => friends[k].name).filter(Boolean);
+// Confirm, then queue a removal. Shared by the table and review mode. Returns
+// whether it went ahead.
+function confirmAndRemove(queue, skipped = 0) {
+  if (!queue.length) return false;
+  if (jobIsActive()) {
+    alert("Another job is running. Wait for it to finish, or cancel it from its banner.");
+    return false;
+  }
+  const names = queue.map((k) => friends[k] && friends[k].name).filter(Boolean);
   const preview = names.slice(0, 8).join(", ") + (names.length > 8 ? "…" : "");
   const cap = settings.maxRemovalsPerRun;
   const capNote = queue.length > cap ? ` (capped at ${cap} this run)` : "";
   const a = account || {};
   if (!a.isPro && (a.removalsRemaining ?? 0) === 0) {
     upgradePrompt(`You've used all ${a.removalsLimit ?? 40} free removals this month.`);
-    return;
+    return false;
   }
+  const { today, cap: dayCap } = dailyUsage();
+  const leftToday = Math.max(0, dayCap - today);
+  if (!leftToday) {
+    alert(`You've reached today's limit of ${dayCap} removals. It resets at midnight — spreading removals over days keeps your account safe.`);
+    return false;
+  }
+  const dayNote = leftToday < Math.min(queue.length, cap)
+    ? `\n\nDaily limit: only ${leftToday} more today, so the rest wait for tomorrow.`
+    : "";
   const allowanceNote =
     !a.isPro && a.removalsRemaining < Math.min(queue.length, cap)
       ? `\n\nFree plan: only ${a.removalsRemaining} more removals this month, so the rest of the selection will be held back.`
@@ -971,11 +1031,10 @@ $("btnRemove").addEventListener("click", () => {
   const skipNote = skipped
     ? `\n\n${skipped} protected ${skipped === 1 ? "friend" : "friends"} in the selection will be skipped — use "Unprotect selected" first if you meant to include them.`
     : "";
-  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}${allowanceNote}\n\nThis cannot be undone by the extension.`)) return;
+  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}${dayNote}${allowanceNote}\n\nYou'll have 30 seconds to undo before anything is sent to Facebook. After that it can't be undone by the extension.`)) return false;
   runCmd({ cmd: "startRemoval", friendKeys: queue });
-  selected.clear();
-  updateActionButtons();
-});
+  return true;
+}
 
 // Bulk-protect every selected friend (selection spans pages). The selection is
 // left alone — protected friends stay tickable, so clearing it here would just
@@ -1081,6 +1140,7 @@ $("btnSaveSettings").addEventListener("click", async () => {
   const min = Math.max(30, parseInt($("setDelayMin").value, 10) || 30);
   await saveSettings({
     maxRemovalsPerRun: Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20),
+    maxRemovalsPerDay: Math.min(200, Math.max(1, parseInt($("setMaxPerDay").value, 10) || 40)),
     removeDelayMinSec: min,
     removeDelayMaxSec: Math.max(min, parseInt($("setDelayMax").value, 10) || 60),
   });
@@ -1228,10 +1288,6 @@ $("btnTokenCreate").addEventListener("click", async () => {
   box.querySelector("button").addEventListener("click", () => navigator.clipboard.writeText(resp.token.token).catch(() => {}));
   loadTokens();
 });
-// Tokens live on the server; only fetch them when someone opens the panel.
-$("inboundPanel").addEventListener("toggle", () => {
-  if ($("inboundPanel").open) { loadInbound(); loadTokens(); }
-});
 
 // ------------------------------------------------------------- activity log
 
@@ -1255,6 +1311,11 @@ function renderLog() {
     return e.trigger === filter;
   });
   $("logCount").textContent = activityLog.length ? `(${activityLog.length})` : "";
+  // Problems in the last week get a red count in the nav, so they're seen.
+  const weekAgo = Date.now() - 7 * 86400000;
+  const problems = activityLog.filter((e) => e.startedAt > weekAgo && e.status === "error").length;
+  $("navActivityCount").textContent = problems ? `${problems} failed` : "";
+  $("navActivityCount").classList.toggle("alert", problems > 0);
   $("logEmpty").classList.toggle("hidden", rows.length > 0);
   const tbody = $("logRows");
   tbody.textContent = "";
@@ -1306,6 +1367,360 @@ $("btnLogClear").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ cmd: "clearActivityLog" });
 });
 
+// ------------------------------------------------------------- views (left nav)
+
+const VIEW_TITLES = { friends: "Friends", activity: "Activity", automations: "Automations", settings: "Settings" };
+
+function showView(name) {
+  if (!VIEW_TITLES[name]) name = "friends";
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.dataset.view !== name));
+  document.querySelectorAll(".navitem").forEach((a) => a.classList.toggle("active", a.dataset.view === name));
+  $("pageTitle").textContent = VIEW_TITLES[name];
+  // Server-backed panels load when they're looked at, not on every open.
+  if (name === "automations") { loadInbound(); loadTokens(); loadNotify(); }
+  if (name === "activity") loadLog();
+}
+window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
+
+// ------------------------------------------------------------- jobs & safety
+
+function jobIsActive() {
+  return !!(job && (job.status === "running" || job.status === "queued"));
+}
+
+// Removals the extension made today — mirrors removedToday() in background.js.
+function dailyUsage() {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const today = Object.values(friends).filter(
+    (f) => f.removedAt && !f.removedManually && f.removedAt >= midnight.getTime()
+  ).length;
+  return { today, cap: settings.maxRemovalsPerDay || 40 };
+}
+
+function renderDailyMeter() {
+  const { today, cap } = dailyUsage();
+  const el = $("dailyMeter");
+  el.classList.toggle("near", today >= cap * 0.75 && today < cap);
+  el.classList.toggle("full", today >= cap);
+  $("dailyText").textContent = today >= cap
+    ? `Daily limit reached (${cap}) — back tomorrow`
+    : `Today: ${today} of ${cap} removals`;
+  $("dailyFill").style.width = `${Math.min(100, (100 * today) / cap)}%`;
+}
+
+// The 30-second window between "Remove" and anything reaching Facebook.
+function renderQueuedRemoval(bar) {
+  bar.classList.add("queued");
+  const left = Math.max(0, Math.ceil(((job.startsAt || Date.now()) - Date.now()) / 1000));
+  const n = (job.queue || []).length;
+  const body = document.createElement("div");
+  body.className = "jobbody";
+  const label = document.createElement("span");
+  label.innerHTML = left
+    ? `<b>Removing ${n} ${n === 1 ? "friend" : "friends"} in ${left}s</b> — nothing has been sent to Facebook yet.`
+    : `<b>Starting…</b>`;
+  body.appendChild(label);
+  const track = document.createElement("div");
+  track.className = "jobprogress countdown";
+  const fill = document.createElement("span");
+  fill.className = "ok";
+  fill.style.width = `${(100 * left) / 30}%`;
+  track.appendChild(fill);
+  body.appendChild(track);
+  const names = (job.queue || []).map((k) => friends[k] && friends[k].name).filter(Boolean);
+  if (names.length) {
+    const who = document.createElement("div");
+    who.className = "jobpacing";
+    who.textContent = names.slice(0, 6).join(", ") + (names.length > 6 ? ` and ${names.length - 6} more` : "");
+    body.appendChild(who);
+  }
+  const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+  if (warnings.length) {
+    const w = document.createElement("div");
+    w.className = "jobpacing";
+    w.textContent = warnings.join(" ");
+    body.appendChild(w);
+  }
+  bar.appendChild(body);
+
+  const actions = document.createElement("div");
+  actions.className = "jobactions";
+  const undo = document.createElement("button");
+  undo.className = "undo";
+  undo.textContent = "Undo";
+  undo.addEventListener("click", async () => {
+    undo.disabled = true;
+    await chrome.runtime.sendMessage({ cmd: "cancelJob" });
+  });
+  actions.appendChild(undo);
+  bar.appendChild(actions);
+}
+
+// ------------------------------------------------------------- why suggested
+
+function fmtWindow(days) {
+  const named = { 7: "week", 14: "2 weeks", 30: "month", 60: "2 months", 90: "3 months", 180: "6 months", 365: "year" };
+  return named[days] || `${days} days`;
+}
+
+function fmtAgo(ts) {
+  const days = Math.floor((Date.now() - ts) / 86400000);
+  if (days < 1) return "today";
+  if (days < 45) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const months = Math.round(days / 30);
+  return months < 18 ? `${months} months ago` : `${Math.round(days / 365)} years ago`;
+}
+
+// One plain-language line explaining a friend's place in the list.
+function whySuggested(r) {
+  const parts = [];
+  if (r.score > 0) {
+    parts.push(`${r.reactions} reaction${r.reactions === 1 ? "" : "s"}, ${r.comments} comment${r.comments === 1 ? "" : "s"}` +
+      (r.lastAt ? `, last ${fmtAgo(r.lastAt)}` : ""));
+  } else {
+    const d = lastEngagementScan && lastEngagementScan.days;
+    parts.push(d ? `No reactions or comments on your posts in the last ${fmtWindow(d)}` : "No reactions or comments on the posts scanned");
+  }
+  if (r.friendedAt) {
+    const since = new Date(r.friendedAt).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+    const fresh = Date.now() - r.friendedAt < 60 * 86400000;
+    parts.push(fresh ? `friends since ${since} — new, may not have had a chance yet` : `friends since ${since}`);
+  } else if (r.rank !== null && r.rank < 20) {
+    parts.push("one of your newest friends — may not have had a chance yet");
+  }
+  return parts.join(" · ");
+}
+
+// ------------------------------------------------------------- first-run checklist
+
+function checklistState() {
+  const list = Object.values(friends);
+  return {
+    friends: list.length > 0,
+    engagement: Object.keys(engagement).length > 0 || !!lastEngagementScan || hasSyncedEngagement(),
+    review: !!settings.reviewedAt || list.some((f) => f.whitelisted || f.removedAt),
+  };
+}
+
+function renderChecklist() {
+  const st = checklistState();
+  const allDone = st.friends && st.engagement && st.review;
+  $("checklist").classList.toggle("hidden", allDone || !!settings.checklistHidden);
+  $("ckFriends").classList.toggle("done", st.friends);
+  $("ckEngagement").classList.toggle("done", st.engagement);
+  $("ckReview").classList.toggle("done", st.review);
+  // One step at a time: later buttons wait for the earlier steps.
+  $("ckEngagementBtn").disabled = !st.friends;
+  $("ckReviewBtn").disabled = !st.engagement;
+}
+
+$("btnChecklistHide").addEventListener("click", () => {
+  saveSettings({ checklistHidden: true });
+  renderChecklist();
+});
+$("ckFriendsBtn").addEventListener("click", () => $("btnScanFriends").click());
+$("ckEngagementBtn").addEventListener("click", () => $("btnScanEngagement").click());
+$("ckReviewBtn").addEventListener("click", () => openReview());
+
+// ------------------------------------------------------------- review mode
+//
+// One person at a time: Keep (protect), Remove (add to the list), Skip.
+// Keep is saved straight away; removals are collected and go through the
+// usual confirm + 30-second undo when you finish.
+
+let rv = null; // { keys, i, choice: { key: "keep"|"remove"|"skip" } }
+
+function reviewRow(key) {
+  return visibleRows({ ignoreFilters: true }).find((r) => r.key === key) || null;
+}
+
+function openReview() {
+  if (jobIsActive() && job.type === "removal") {
+    alert("A removal is in progress. Review again when it's finished.");
+    return;
+  }
+  // Start from the table as filtered and sorted, minus anyone already decided.
+  const keys = visibleRows().filter((r) => !r.removedAt && !r.whitelisted).map((r) => r.key);
+  if (!keys.length) {
+    alert("Nobody to review with the current filters. Clear a filter, or run the scans first.");
+    return;
+  }
+  rv = { keys, i: 0, choice: {} };
+  if (!settings.reviewedAt) saveSettings({ reviewedAt: Date.now() });
+  $("review").classList.remove("hidden");
+  renderReview();
+}
+
+function closeReview() {
+  $("review").classList.add("hidden");
+  render();
+}
+
+function renderReview() {
+  const total = rv.keys.length;
+  const done = rv.i >= total;
+  const removes = rv.keys.filter((k) => rv.choice[k] === "remove");
+  const keeps = rv.keys.filter((k) => rv.choice[k] === "keep").length;
+  $("rvProgress").textContent = done ? `${total} reviewed` : `${rv.i + 1} of ${total}`;
+  $("rvBarFill").style.width = `${(100 * Math.min(rv.i, total)) / total}%`;
+  $("rvTally").textContent = `${keeps} kept · ${removes.length} to remove · ${rv.keys.filter((k) => rv.choice[k] === "skip").length} skipped`;
+  $("rvFinish").textContent = `Remove ${removes.length}`;
+  $("rvFinish").disabled = removes.length === 0;
+  $("rvBody").classList.toggle("hidden", done);
+  $("rvDone").classList.toggle("hidden", !done);
+  if (done) {
+    $("rvSummary").textContent = removes.length
+      ? `You chose to remove ${removes.length}. Press "Remove ${removes.length}" to start — you'll still have 30 seconds to undo.`
+      : "Nothing marked for removal. Everyone you kept is now protected.";
+    return;
+  }
+  const r = reviewRow(rv.keys[rv.i]);
+  if (!r) { rv.i++; renderReview(); return; }
+  // No photo yet: a transparent pixel, so the grey placeholder circle shows.
+  $("rvPhoto").src = r.photo || "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  $("rvName").textContent = r.name;
+  $("rvName").href = r.url;
+  $("rvWhy").textContent = whySuggested(r);
+  $("rvReactions").textContent = r.reactions;
+  $("rvComments").textContent = r.comments;
+  $("rvLast").textContent = r.lastAt ? fmtDate(r.lastAt) : "never";
+  $("rvSince").textContent = r.friendedAt ? fmtDate(r.friendedAt) : r.rank !== null ? `#${r.rank + 1} newest` : "—";
+  const c = rv.choice[r.key];
+  $("rvChoice").textContent = c ? { keep: "Kept", remove: "Marked to remove", skip: "Skipped" }[c] : "";
+  $("rvChoice").className = "rvchoice " + (c || "");
+  $("rvBack").disabled = rv.i === 0;
+}
+
+function reviewChoose(choice) {
+  if (!rv || rv.i >= rv.keys.length) return;
+  const key = rv.keys[rv.i];
+  const prev = rv.choice[key];
+  if (choice === "keep" && prev !== "keep") setProtected([key], true);
+  if (prev === "keep" && choice !== "keep") setProtected([key], false);
+  rv.choice[key] = choice;
+  rv.i++;
+  renderReview();
+}
+
+$("rvKeep").addEventListener("click", () => reviewChoose("keep"));
+$("rvRemove").addEventListener("click", () => reviewChoose("remove"));
+$("rvSkip").addEventListener("click", () => reviewChoose("skip"));
+$("rvBack").addEventListener("click", () => { if (rv && rv.i > 0) { rv.i--; renderReview(); } });
+$("rvClose").addEventListener("click", closeReview);
+$("rvFinish").addEventListener("click", () => {
+  const removes = rv.keys.filter((k) => rv.choice[k] === "remove" && friends[k] && !friends[k].whitelisted);
+  if (confirmAndRemove(removes)) {
+    rv = null;
+    closeReview();
+  }
+});
+$("btnReview").addEventListener("click", openReview);
+document.addEventListener("keydown", (e) => {
+  if ($("review").classList.contains("hidden") || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "k") reviewChoose("keep");
+  else if (k === "r") reviewChoose("remove");
+  else if (k === "s" || e.key === "ArrowRight") reviewChoose("skip");
+  else if (e.key === "ArrowLeft") $("rvBack").click();
+  else if (e.key === "Escape") closeReview();
+  else return;
+  e.preventDefault();
+});
+
+// ------------------------------------------------------------- send to the CRM
+//
+// Instead of removing someone, hand them to Not Another Social CRM to
+// reconnect with. The file uses the CRM's own import columns (csv.ts there):
+// Full Name, Facebook Profile URL, Facebook User ID, Tags (";"-separated).
+
+$("btnToCrm").addEventListener("click", () => {
+  const { open, unprotectable } = selectionSplit();
+  const keys = [...open, ...unprotectable];
+  if (!keys.length) return;
+  const tag = prompt(
+    `Download ${keys.length} ${keys.length === 1 ? "friend" : "friends"} as a contacts file for Not Another Social CRM.\n\nTag them with:`,
+    "Reconnect"
+  );
+  if (tag === null) return;
+  const esc = (s) => '"' + String(s || "").replace(/"/g, '""') + '"';
+  const tags = [tag.trim() || "Reconnect", "From Friend Sweeper"].join("; ");
+  const csv = [
+    "Full Name,Facebook Profile URL,Facebook User ID,Tags",
+    ...keys.map((k) => {
+      const f = friends[k];
+      return [esc(f.name), esc(f.url), esc(f.profileId || ""), esc(tags)].join(",");
+    }),
+  ].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `friend-sweeper-to-crm-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  if (confirm("Saved. In Not Another Social CRM, use Import CSV and pick this file — the people are tagged so you can start a reconnect campaign.\n\nDon't have the CRM yet? Open its website?")) {
+    window.open("https://notanothersocialcrm.com", "_blank", "noopener");
+  }
+});
+
+// ------------------------------------------------------------- finish notifications
+
+let notifyCfg = { desktop: false, webhookUrl: "", webhookOn: "all" };
+
+async function loadNotify() {
+  const resp = await chrome.runtime.sendMessage({ cmd: "getNotify" }).catch(() => null);
+  if (resp && resp.ok) notifyCfg = resp.notify;
+  renderNotify();
+}
+
+function renderNotify() {
+  $("notifyDesktop").checked = !!notifyCfg.desktop;
+  if (document.activeElement !== $("notifyUrl")) $("notifyUrl").value = notifyCfg.webhookUrl || "";
+  $("notifyOn").value = notifyCfg.webhookOn || "all";
+  $("btnNotifyTest").disabled = !notifyCfg.desktop && !notifyCfg.webhookUrl;
+}
+
+async function saveNotify(patch) {
+  const resp = await chrome.runtime.sendMessage({ cmd: "setNotify", patch }).catch((e) => ({ ok: false, error: String(e) }));
+  if (resp && resp.ok) notifyCfg = resp.notify;
+  else if (resp && resp.error) alert(resp.error);
+  renderNotify();
+  return resp && resp.ok;
+}
+
+$("notifyDesktop").addEventListener("change", async () => {
+  const on = $("notifyDesktop").checked;
+  // Asked for only when switched on, so installing never needs the permission.
+  if (on && chrome.permissions) {
+    const granted = await chrome.permissions.request({ permissions: ["notifications"] }).catch(() => false);
+    if (!granted) { $("notifyDesktop").checked = false; return; }
+  }
+  saveNotify({ desktop: on });
+});
+
+$("btnNotifySave").addEventListener("click", async () => {
+  const url = $("notifyUrl").value.trim();
+  if (url) {
+    let origin;
+    try { origin = new URL(url).origin; } catch (e) { alert("That isn't a web address."); return; }
+    if (!url.startsWith("https://")) { alert("The address must start with https://"); return; }
+    // The extension may only call sites the user has allowed — ask for this one.
+    if (chrome.permissions) {
+      const granted = await chrome.permissions.request({ origins: [origin + "/*"] }).catch(() => false);
+      if (!granted) { $("notifyStatus").textContent = "Not saved — the extension needs permission to send to that site."; return; }
+    }
+  }
+  if (await saveNotify({ webhookUrl: url, webhookOn: $("notifyOn").value })) {
+    $("notifyStatus").textContent = url ? "Saved." : "Removed.";
+  }
+});
+$("notifyOn").addEventListener("change", () => saveNotify({ webhookOn: $("notifyOn").value }));
+$("btnNotifyTest").addEventListener("click", async () => {
+  $("notifyStatus").textContent = "Sending…";
+  const resp = await chrome.runtime.sendMessage({ cmd: "testNotify" }).catch(() => null);
+  $("notifyStatus").textContent = (resp && resp.result) || "Sent.";
+});
+
 // Live-refresh when scans — or another browser, via sync — write new data.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
@@ -1343,19 +1758,26 @@ chrome.storage.onChanged.addListener((changes, area) => {
     activityLog = changes.activityLog.newValue || [];
     renderLog();
   }
+  if (changes.lastEngagementScan) lastEngagementScan = changes.lastEngagementScan.newValue || null;
+  if (changes.notify) {
+    notifyCfg = changes.notify.newValue || notifyCfg;
+    renderNotify();
+  }
   if (inbound && (changes.inboundStatus || changes.inboundSettings)) {
     if (changes.inboundStatus) inbound.status = changes.inboundStatus.newValue || null;
     if (changes.inboundSettings) inbound.settings = changes.inboundSettings.newValue || inbound.settings;
     renderInbound();
   }
-  if (changes.friends || changes.engagement || changes.job || changes.settings) render();
+  if (changes.friends || changes.engagement || changes.job || changes.settings || changes.lastEngagementScan) render();
 });
 
-// Tick the "next removal in ~Ns" countdown.
+// Tick the undo countdown and the "next removal in ~Ns" countdown.
 setInterval(() => {
-  if (job && job.type === "removal" && job.status === "running") renderJob();
+  if (job && (job.status === "queued" || (job.type === "removal" && job.status === "running"))) renderJob();
 }, 1000);
 
 loadAccount().then(load);
 loadLog();
 loadInbound();
+loadNotify();
+showView(location.hash.slice(1));

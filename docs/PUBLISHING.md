@@ -1,5 +1,21 @@
 # Publishing notes: store listing, website, privacy policy, terms
 
+> **Automations update (webhooks, notifications).** No new install-time permissions, but the
+> manifest now declares two *optional* ones, requested only when the user switches the
+> feature on:
+>
+> - `notifications` (optional permission) — "shows a desktop notification when a scan or
+>   removal the user wasn't watching finishes."
+> - `https://*/*` (optional host permission) — asked for one site at a time when the user
+>   saves a result-webhook address, so the extension can POST the job result there (same
+>   pattern as Not Another Social CRM's webhooks).
+> - **Incoming webhooks:** the worker calls the auth project's `inbound_*` tables/functions
+>   as the signed-in user, once a minute, only in browsers where the user switched webhooks
+>   on. Request payloads contain scan commands, never friend data.
+> - **Data leaving the browser (new):** the result webhook sends job summaries and, after an
+>   engagement scan, up to 100 suggested friends' names and profile URLs — only to an address
+>   the user typed in. Disclose this in the privacy policy.
+
 > **v1.2 update — accounts and plans.** The extension is now Not Another Friend Sweeper and
 > requires a notanotherfriendsweeper.com account. That changes several points below; the
 > website's privacy policy and terms (notanotherfriendsweeper.com/privacy, /terms) already

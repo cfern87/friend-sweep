@@ -91,6 +91,13 @@ async function clearJob() {
   await chrome.alarms.clear(ALARM_REMOVAL);
   await chrome.alarms.clear(ALARM_CLEANUP);
   await chrome.alarms.clear(ALARM_CHAIN);
+  await chrome.alarms.clear(ALARM_REMOVAL_START);
+}
+
+// Running, or a removal waiting out its undo window: either way the job owns
+// the Facebook tab, and nothing else may start.
+function jobActive(job) {
+  return !!(job && (job.status === "running" || job.status === "queued"));
 }
 
 // ---------------------------------------------------------------- activity log
@@ -177,6 +184,11 @@ async function endJob(job, status, error) {
     if (job.type === "removal") entry.detail = await removalDetail(job);
     await logPut(entry);
   }
+  if (job.type === "engagementScan" && status === "done") {
+    await setStore({ lastEngagementScan: { at: Date.now(), days: job.days || 30 } });
+  }
+  const chainGoesOn = status === "done" && Array.isArray(job.chain) && job.chain.length;
+  if (!chainGoesOn) await announceJobEnd(job, status, error);
   if (!job.inbound) return;
   const step = { scan: job.type, status, summary: describeJob(job), progress: job.progress || {} };
   if (error) step.error = error;
@@ -190,6 +202,88 @@ async function endJob(job, status, error) {
     ...(status === "done" ? {} : { error: error || (status === "cancelled" ? "Cancelled from the dashboard." : "Failed.") }),
   });
   job.inbound = null;
+}
+
+// ---------------------------------------------------------------- notifications
+//
+// Tell the user (and their tools) when something finished — mostly for the
+// runs nobody was watching: scheduled and webhook ones. Both are opt-in and
+// configured per browser in `notify` (chrome.storage.local):
+//   { desktop: bool, webhookUrl: string, webhookOn: "all" | "unattended" }
+// Desktop notifications use the optional "notifications" permission and the
+// webhook the optional host permission for its site, both asked for when the
+// user switches them on.
+
+const NOTIFY_KEY = "notify";
+const SUGGESTION_LIMIT = 100;
+
+// Friends with no engagement who aren't protected or removed — the same rule
+// as the dashboard's "suggested" badge.
+async function currentSuggestions() {
+  const { friends = {}, engagement = {} } = await getStore(["friends", "engagement"]);
+  const engaged = new Set(Object.values(engagement).map((e) => e.friendKey));
+  for (const f of Object.values(friends)) if (f.syncEng && (f.syncEng[0] || f.syncEng[1])) engaged.add(f.key);
+  return Object.values(friends)
+    .filter((f) => !f.removedAt && !f.whitelisted && !engaged.has(f.key))
+    .map((f) => ({ name: f.name || "", url: f.url || "", friendedAt: f.friendedAt ? new Date(f.friendedAt).toISOString().slice(0, 10) : null }));
+}
+
+async function announceJobEnd(job, status, error) {
+  const { [NOTIFY_KEY]: cfg } = await getStore(NOTIFY_KEY);
+  if (!cfg) return;
+  const label = JOB_LABELS[job.type] || "Job";
+  const outcome = { done: "finished", error: "failed", cancelled: "was cancelled" }[status] || status;
+  const summary = describeJob(job);
+
+  if (cfg.desktop && chrome.notifications) {
+    try {
+      chrome.notifications.create("nafs-" + (job.logId || newId()), {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/icon128.png"),
+        title: `${label} ${outcome}`,
+        message: [summary, error].filter(Boolean).join(" — ").slice(0, 250),
+        priority: status === "done" ? 0 : 1,
+      });
+    } catch (e) {
+      /* permission withdrawn — nothing to do */
+    }
+  }
+
+  const url = typeof cfg.webhookUrl === "string" ? cfg.webhookUrl.trim() : "";
+  const unattended = job.trigger === "schedule" || job.trigger === "webhook";
+  if (!/^https:\/\//.test(url) || (cfg.webhookOn === "unattended" && !unattended && !job.test)) return;
+  const payload = {
+    event: "job." + (status === "done" ? "finished" : status === "error" ? "failed" : "cancelled"),
+    product: "not-another-friend-sweeper",
+    ...(job.test ? { test: true } : {}),
+    job: {
+      type: job.type,
+      label,
+      trigger: job.trigger || "manual",
+      source: job.inbound ? job.inbound.label : null,
+      status,
+      summary,
+      error: error || null,
+      warnings: job.warnings || [],
+      progress: job.progress || {},
+      startedAt: new Date(job.startedAt || Date.now()).toISOString(),
+      finishedAt: new Date().toISOString(),
+    },
+  };
+  if (job.type === "removal") payload.job.detail = await removalDetail(job);
+  if (job.type === "engagementScan" && status === "done") {
+    const all = await currentSuggestions();
+    payload.suggestions = { total: all.length, friends: all.slice(0, SUGGESTION_LIMIT) };
+  }
+  let result;
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    result = res.ok ? "sent" : `failed (HTTP ${res.status})`;
+  } catch (e) {
+    result = "failed (" + String((e && e.message) || e).slice(0, 80) + ")";
+  }
+  if (job.logId) await logPut({ id: job.logId, notified: "Result webhook " + result });
+  return "Result webhook " + result;
 }
 
 // Names, not just counts, for a removal's log entry.
@@ -275,7 +369,7 @@ function startScanByType(type, opts) {
 // running — the poller already checks, this is the backstop.
 async function startScansForWebhook(command, { days, inbound }) {
   const job = await getJob();
-  if (job && job.status === "running") return { ok: false, error: "Another job is running." };
+  if (jobActive(job)) return { ok: false, error: "Another job is running." };
   await clearJob();
   const chain = {
     "scan.friends": ["friendScan"],
@@ -370,6 +464,22 @@ async function startEngagementScan(opts = {}) {
   }, opts);
 }
 
+// Removals wait this long before anything is sent, so "Undo" in the banner
+// can call them off. Chrome's alarm floor is 30s, which is exactly this.
+const UNDO_MS = 30000;
+const ALARM_REMOVAL_START = "removal-start";
+const DEFAULT_DAILY_CAP = 40;
+
+// Removals the extension made today (local time) — the number the daily cap
+// and the dashboard's meter count. Hand-marked removals aren't ours.
+function removedToday(friends) {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  return Object.values(friends).filter(
+    (f) => f.removedAt && !f.removedManually && f.removedAt >= midnight.getTime()
+  ).length;
+}
+
 async function startRemoval(friendKeys) {
   const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
   const cap = settings.maxRemovalsPerRun || 20;
@@ -377,6 +487,22 @@ async function startRemoval(friendKeys) {
     .filter((k) => friends[k] && !friends[k].removedAt && !friends[k].whitelisted)
     .slice(0, cap);
   if (!queue.length) return { ok: false, error: "Nobody in the selection can be removed." };
+
+  // Daily cap: a fast day of unfriending is what gets accounts action-blocked.
+  const dailyCap = settings.maxRemovalsPerDay || DEFAULT_DAILY_CAP;
+  const leftToday = Math.max(0, dailyCap - removedToday(friends));
+  if (!leftToday) {
+    return {
+      ok: false,
+      error: `You've reached today's limit of ${dailyCap} removals. It resets at midnight — spreading removals over days keeps your account safe.`,
+    };
+  }
+  const warnings = [];
+  if (queue.length > leftToday) {
+    warnings.push(`Daily limit: ${queue.length - leftToday} of your selection were held back for tomorrow (limit ${dailyCap} a day).`);
+    queue = queue.slice(0, leftToday);
+  }
+
   // Free accounts have a monthly removal allowance, counted on the server.
   const allowance = await NAFS.allowRemovals(queue.length);
   if (!allowance.allowed) {
@@ -384,6 +510,40 @@ async function startRemoval(friendKeys) {
   }
   const trimmed = queue.length - allowance.allowed;
   queue = queue.slice(0, allowance.allowed);
+  if (trimmed) {
+    warnings.push(`Free plan: ${trimmed} of your selection were held back — that's all of this month's free removals. Upgrade to Pro for unlimited removals.`);
+  }
+
+  // Same defaults and ~30s floor the dashboard shows and the legacy flow uses.
+  const minSec = Math.max(30, settings.removeDelayMinSec || 30);
+  const maxSec = Math.max(minSec, settings.removeDelayMaxSec || 60);
+  // Queued, not started: nothing touches Facebook until the undo window ends.
+  await setJob({
+    type: "removal",
+    mode: "batch",
+    status: "queued",
+    queuedAt: Date.now(),
+    startsAt: Date.now() + UNDO_MS,
+    queue,
+    done: [],
+    failed: [],
+    current: null,
+    progress: { total: queue.length, done: 0, failed: 0 },
+    delays: { minSec, maxSec },
+    ...(warnings.length ? { warnings } : {}),
+  });
+  chrome.alarms.create(ALARM_REMOVAL_START, { delayInMinutes: UNDO_MS / 60000 });
+  return { ok: true, trimmed, queued: queue.length, startsAt: Date.now() + UNDO_MS };
+}
+
+// The undo window is over: open Facebook and start removing.
+async function startQueuedRemoval() {
+  const job = await getJob();
+  if (!job || job.type !== "removal" || job.status !== "queued") return;
+  if (Date.now() < job.startsAt - 1000) {
+    chrome.alarms.create(ALARM_REMOVAL_START, { when: job.startsAt });
+    return;
+  }
   // Batch mode: open the friends page and remove the whole selection from it via
   // GraphQL unfriend mutations — no per-friend profile navigation. The friends
   // page is used (rather than the home feed) so the friends-collection token is
@@ -391,26 +551,10 @@ async function startRemoval(friendKeys) {
   // API. The content script picks the batch up through its getJob handshake, and
   // falls back to the legacy per-profile flow if the API path can't run.
   const tabId = await openJobTab(FB + "/me/friends");
-  // Same defaults and ~30s floor the dashboard shows and the legacy flow uses.
-  const minSec = Math.max(30, settings.removeDelayMinSec || 30);
-  const maxSec = Math.max(minSec, settings.removeDelayMaxSec || 60);
-  await beginJob({
-    type: "removal",
-    mode: "batch",
-    status: "running",
-    tabId,
-    startedAt: Date.now(),
-    queue,
-    done: [],
-    failed: [],
-    current: null,
-    progress: { total: queue.length, done: 0, failed: 0 },
-    delays: { minSec, maxSec },
-    ...(trimmed
-      ? { warnings: [`Free plan: ${trimmed} of your selection were held back — that's all of this month's free removals. Upgrade to Pro for unlimited removals.`] }
-      : {}),
-  });
-  return { ok: true, trimmed };
+  job.status = "running";
+  job.tabId = tabId;
+  job.startedAt = Date.now();
+  await beginJob(job);
 }
 
 // Remember how each removal went on the friend record itself, so the list can
@@ -521,6 +665,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_REMOVAL) removalNext();
   else if (alarm.name === ALARM_CLEANUP) cleanupFinishedJob();
   else if (alarm.name === ALARM_CHAIN) runChainStep();
+  else if (alarm.name === ALARM_REMOVAL_START) startQueuedRemoval();
   else if (alarm.name === ALARM_TICK) onTick();
   else if (alarm.name === LEGACY_ALARM_AUTO) chrome.alarms.clear(LEGACY_ALARM_AUTO);
   else if (alarm.name === NAFS.ALARM) NAFS.refreshEntitlement().catch(() => {});
@@ -881,10 +1026,7 @@ chrome.runtime.onStartup.addListener(NAFS.ensureAlarm);
 
 FriendSync.init({
   applySchedule,
-  isJobRunning: async () => {
-    const job = await getJob();
-    return !!(job && job.status === "running");
-  },
+  isJobRunning: async () => jobActive(await getJob()),
   // Another browser deleted everything; the wiped schedule reads as "off", so
   // the tick has nothing left to run. Nothing to clear here any more.
   // The activity log names people, so it goes with the rest of the data.
@@ -892,10 +1034,7 @@ FriendSync.init({
 });
 
 FriendInbound.init({
-  isBusy: async () => {
-    const job = await getJob();
-    return !!(job && job.status === "running");
-  },
+  isBusy: async () => jobActive(await getJob()),
   deviceId,
   startScans: startScansForWebhook,
   logRequest: ({ command, label, status, error }) =>
@@ -952,7 +1091,7 @@ async function runScheduledScan(force) {
   }
 
   const job = await getJob();
-  if (job && job.status === "running") {
+  if (jobActive(job)) {
     // Something is already driving a Facebook tab — a manual scan, a webhook,
     // or the previous scheduled run still going. Don't fight it: the run stays
     // due and the next tick after the job ends starts it.
@@ -1054,14 +1193,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       // ---- from the dashboard / popup
       case "startFriendScan":
+        if (jobActive(await getJob())) {
+          sendResponse({ ok: false, error: "Another job is running. Wait for it to finish, or cancel it from its banner." });
+          break;
+        }
         await startFriendScan();
         sendResponse({ ok: true });
         break;
       case "startEngagementScan":
+        if (jobActive(await getJob())) {
+          sendResponse({ ok: false, error: "Another job is running. Wait for it to finish, or cancel it from its banner." });
+          break;
+        }
         await startEngagementScan({ days: msg.days });
         sendResponse({ ok: true });
         break;
       case "startRemoval":
+        if (jobActive(await getJob())) {
+          sendResponse({ ok: false, error: "Another job is running. Wait for it to finish, or cancel it from its banner." });
+          break;
+        }
         sendResponse(await startRemoval(msg.friendKeys || []));
         break;
       case "cancelJob": {
@@ -1070,6 +1221,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (job && job.status === "running") {
           job.status = "cancelled";
           await endJob(job, "cancelled", "Cancelled");
+        } else if (job && job.status === "queued") {
+          // Undone inside the window: nothing was sent to Facebook.
+          await logPut({
+            id: newId(), kind: "removal", trigger: "manual",
+            startedAt: job.queuedAt || Date.now(), finishedAt: Date.now(), status: "cancelled",
+            summary: `Undone before it started — ${job.queue.length} ${job.queue.length === 1 ? "friend" : "friends"} kept`,
+          });
         }
         await clearJob();
         sendResponse({ ok: true });
@@ -1128,6 +1286,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
 
+      // ---- finish notifications (desktop + result webhook)
+      case "getNotify": {
+        const { [NOTIFY_KEY]: cfg } = await getStore(NOTIFY_KEY);
+        sendResponse({ ok: true, notify: { desktop: false, webhookUrl: "", webhookOn: "all", ...(cfg || {}) } });
+        break;
+      }
+      case "setNotify": {
+        const { [NOTIFY_KEY]: cur } = await getStore(NOTIFY_KEY);
+        const next = { desktop: false, webhookUrl: "", webhookOn: "all", ...(cur || {}), ...(msg.patch || {}) };
+        next.desktop = !!next.desktop;
+        next.webhookUrl = String(next.webhookUrl || "").trim().slice(0, 500);
+        next.webhookOn = next.webhookOn === "unattended" ? "unattended" : "all";
+        if (next.webhookUrl && !/^https:\/\//.test(next.webhookUrl)) {
+          sendResponse({ ok: false, error: "The result webhook address must start with https://" });
+          break;
+        }
+        await setStore({ [NOTIFY_KEY]: next });
+        sendResponse({ ok: true, notify: next });
+        break;
+      }
+      case "testNotify": {
+        // A sample "finished" event, so a Zap can be built before a real run.
+        const sent = await announceJobEnd({
+          type: "engagementScan", trigger: "manual", startedAt: Date.now() - 60000, days: 30,
+          progress: { posts: 12, events: 34 }, logId: null, test: true,
+        }, "done", null);
+        sendResponse({ ok: true, result: sent ? sent + "." : "Desktop notification shown." });
+        break;
+      }
+
       // ---- incoming webhooks (inbound.js)
       case "inboundInfo":
         sendResponse({
@@ -1160,7 +1348,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Clears the result banner for a job that already ended. Never touches
         // a running job — cancelling is a separate, explicit action.
         const job = await getJob();
-        if (job && job.status !== "running") await clearJob();
+        if (job && !jobActive(job)) await clearJob();
         sendResponse({ ok: true });
         break;
       }
@@ -1235,7 +1423,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "runScheduleNow": {
         const job = await getJob();
-        if (job && job.status === "running") {
+        if (jobActive(job)) {
           sendResponse({ ok: false, error: "A job is already running. Wait for it to finish, or cancel it from its banner." });
           break;
         }

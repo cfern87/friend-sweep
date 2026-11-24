@@ -19,267 +19,421 @@
     </div>
   </div>
 
-  <header>
-    <h1>Not Another Friend Sweeper</h1>
-    <div class="stats" id="stats"></div>
-    <div class="syncstatus" id="syncStatus"></div>
-  </header>
-
-  <section id="account" class="account hidden">
-    <span id="acctPlan" class="plan"></span>
-    <a href="#" id="acctEmail" class="acctemail" title="Open your account on the website"></a>
-    <span id="acctUsage" class="usage"></span>
-    <span class="acctlinks">
-      <a href="#" id="acctUpgrade" class="upgrade hidden">Upgrade to Pro</a>
-      <a href="#" id="acctAccount">My account ↗</a>
-      <a href="#" id="acctBilling">Manage plan</a>
-      <a href="#" id="acctHelp">Get help</a>
-      <a href="#" id="acctSignOut">Sign out</a>
-    </span>
-  </section>
-
-  <section class="toolbar">
-    <div class="group">
-      <button id="btnScanFriends" class="primary" title="Reads your friends list, the order you added them, and (from your Activity Log) the date you became friends">1 · Scan friends</button>
-      <button id="btnScanEngagement" class="primary">2 · Scan engagement</button>
-      <label class="inline">scan back:
-        <select id="scanDays">
-          <option value="7">1 week</option>
-          <option value="14">2 weeks</option>
-          <option value="30" selected>1 month</option>
-          <option value="60" data-pro="1">2 months</option>
-          <option value="90" data-pro="1">3 months</option>
-          <option value="180" data-pro="1">6 months</option>
-          <option value="365" data-pro="1">1 year</option>
-        </select>
-      </label>
-    </div>
-    <div class="group">
-      <button id="btnRemove" class="danger" disabled>Remove selected (0)</button>
-      <button id="btnProtect" class="protect-btn" disabled>Protect selected (0)</button>
-      <button id="btnUnprotect" class="unprotect-btn" disabled>Unprotect selected (0)</button>
-      <button id="btnExport" class="ghost">Export CSV</button>
-    </div>
-  </section>
-
-  <section id="jobBar" class="jobbar hidden"></section>
-
-  <section class="filters">
-    <input type="search" id="search" placeholder="Search name…" />
-    <label><input type="checkbox" id="fltNoEngagement" /> No engagement only</label>
-    <label><input type="checkbox" id="fltHideRemoved" checked /> Hide removed</label>
-    <label><input type="checkbox" id="fltHideProtected" checked /> Hide protected</label>
-    <label id="fltFailedWrap" class="fltfailed hidden"><input type="checkbox" id="fltFailed" /> Removal failed only <span id="fltFailedCount" class="count"></span></label>
-    <select id="sortBy">
-      <option value="score-asc">Least engaged first</option>
-      <option value="score-desc">Most engaged first</option>
-      <option value="recent">Last engaged (newest first)</option>
-      <option value="stale">Last engaged (oldest first)</option>
-      <option value="friended-new">Newest friends first</option>
-      <option value="friended-old">Oldest friends first</option>
-      <option value="name">Name A–Z</option>
-    </select>
-    <label class="selall"><input type="checkbox" id="selAll" /> Select all on page</label>
-    <a href="#" id="selAllMatch" class="selall-match hidden"></a>
-  </section>
-
-  <section class="tablewrap">
-    <table>
-      <thead>
-        <tr>
-          <th></th>
-          <th></th>
-          <th>Name</th>
-          <th>Reactions</th>
-          <th>Comments</th>
-          <th>Score</th>
-          <th>Last engaged</th>
-          <th title="Date you became friends (from your Activity Log, read by Scan friends). Falls back to #N recency rank from the 'Recently added' list — #1 is your newest friend">Friended</th>
-          <th>Status</th>
-          <th title="Protect a friend so they're never suggested or removed">Protect</th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div id="empty" class="empty hidden">
-      No friends scanned yet. Log in to Facebook in this browser, then click
-      <strong>1 · Scan friends</strong>. A Facebook tab will open and load
-      your friends list, then your Activity Log for friend dates — leave it
-      alone until the overlay says it's done.
-    </div>
-    <div id="noMatch" class="empty hidden">No friends match the current filters.</div>
-  </section>
-
-  <section id="pager" class="pager hidden">
-    <span id="pageInfo" class="pageinfo"></span>
-    <label class="inline">per page:
-      <select id="pageSize">
-        <option>25</option>
-        <option selected>50</option>
-        <option>100</option>
-        <option>200</option>
-      </select>
-    </label>
-    <div class="pgnav">
-      <button id="pgFirst" class="ghost pg">« First</button>
-      <button id="pgPrev" class="ghost pg">‹ Prev</button>
-      <span id="pageNum" class="pagenum"></span>
-      <button id="pgNext" class="ghost pg">Next ›</button>
-      <button id="pgLast" class="ghost pg">Last »</button>
-    </div>
-  </section>
-
-  <footer>
-    <details>
-      <summary>Scheduled scans <span id="schedProTag" class="protag hidden">Pro</span></summary>
-      <div class="settings auto">
-        <p id="schedProNote" class="pronote hidden">
-          Scheduled scans are part of Pro. <a href="#" id="schedUpgrade">Upgrade</a> to have scans re-run on their own.
-        </p>
-        <label class="switch">
-          <span>Re-scan on a schedule</span>
-          <input type="checkbox" id="autoEnabled" />
-        </label>
-        <label>Run every
-          <select id="autoEvery">
-            <option value="6">6 hours</option>
-            <option value="12">12 hours</option>
-            <option value="24" selected>day</option>
-            <option value="72">3 days</option>
-            <option value="168">week</option>
-          </select>
-        </label>
-        <label>Engagement window
-          <select id="autoDays">
-            <option value="7">1 week</option>
-            <option value="14">2 weeks</option>
-            <option value="30" selected>1 month</option>
-            <option value="60" data-pro="1">2 months</option>
-            <option value="90" data-pro="1">3 months</option>
-            <option value="180" data-pro="1">6 months</option>
-            <option value="365" data-pro="1">1 year</option>
-          </select>
-        </label>
-        <fieldset class="scanpick">
-          <legend>Scans to run</legend>
-          <label><input type="checkbox" id="autoScanFriends" /> Friends (list, order and dates)</label>
-          <label><input type="checkbox" id="autoScanEngagement" /> Engagement</label>
-        </fieldset>
-        <div class="group">
-          <button id="btnRunSchedule" class="ghost">Run now</button>
-          <span id="autoNext" class="inline"></span>
-        </div>
-        <p class="note">
-          Scheduled runs open a Facebook tab and take focus while they scroll,
-          so pick a cadence you won't mind interrupting you. Only scans can be
-          scheduled — removals only ever run when you start them. A run that comes
-          due while another job is going waits for it to finish. Runs only fire
-          while Chrome is open.
-        </p>
+  <div class="shell">
+    <!-- Same shell as Not Another Social CRM: navigation left, work right. -->
+    <aside class="sidenav">
+      <div class="brand">
+        <img src="../icons/icon32.png" alt="" width="24" height="24" />
+        <span>Friend Sweeper</span>
       </div>
-    </details>
-    <details id="inboundPanel">
-      <summary>Incoming webhooks <span id="inboundProTag" class="protag hidden">Pro</span> <span class="betatag">Beta</span></summary>
-      <div class="settings auto">
-        <p class="note">
-          Start a scan from anywhere — Zapier, a script, a phone shortcut — by
-          sending a request to your private web address. This browser checks for
-          requests once a minute while Chrome is open, runs them one at a time,
-          and records each one in the activity log. Only scans can be started
-          this way; removals never run remotely.
-        </p>
-        <p id="inboundProNote" class="pronote hidden">
-          Incoming webhooks are part of Pro. <a href="#" id="inboundUpgrade">Upgrade</a> to trigger scans remotely.
-        </p>
-        <label class="switch">
-          <span>This browser answers webhooks</span>
-          <input type="checkbox" id="inboundEnabled" />
-        </label>
-        <fieldset class="scanpick" id="inboundCommands">
-          <legend>Requests it will run</legend>
-        </fieldset>
-        <div class="endpoint">
-          <span class="inline">Send requests to</span>
-          <code id="inboundEndpoint">…</code>
-          <button id="btnCopyEndpoint" class="ghost small">Copy</button>
+      <nav>
+        <a href="#friends" class="navitem" data-view="friends">Friends <span id="navFriendsCount" class="navcount"></span></a>
+        <a href="#activity" class="navitem" data-view="activity">Activity <span id="navActivityCount" class="navcount"></span></a>
+        <a href="#automations" class="navitem" data-view="automations">Automations</a>
+        <a href="#settings" class="navitem" data-view="settings">Settings</a>
+      </nav>
+      <div class="navspacer"></div>
+      <div class="family">
+        <div class="familylabel">Also by us</div>
+        <a href="https://notanothersocialcrm.com" target="_blank" rel="noopener">Not Another Social CRM ↗</a>
+      </div>
+      <section id="account" class="account hidden">
+        <div class="acctrow">
+          <span id="acctPlan" class="plan"></span>
+          <a href="#" id="acctEmail" class="acctemail" title="Open your account on the website"></a>
         </div>
-        <div class="tokens">
-          <div class="group">
-            <strong>Tokens</strong>
-            <input type="text" id="tokenLabel" placeholder="Label, e.g. Zapier" maxlength="60" />
-            <button id="btnTokenCreate" class="ghost small">Create token</button>
+        <div id="acctUsage" class="usage"></div>
+        <a href="#" id="acctUpgrade" class="upgrade hidden">Upgrade to Pro</a>
+        <div class="acctlinks">
+          <a href="#" id="acctAccount">My account ↗</a>
+          <a href="#" id="acctBilling">Manage plan</a>
+          <a href="#" id="acctHelp">Get help</a>
+          <a href="#" id="acctSignOut">Sign out</a>
+        </div>
+      </section>
+    </aside>
+
+    <main>
+      <header class="pagehead">
+        <h1 id="pageTitle">Friends</h1>
+        <div class="stats" id="stats"></div>
+        <div class="syncstatus" id="syncStatus"></div>
+      </header>
+
+      <!-- The job banner follows you between views: it's what's happening now. -->
+      <section id="jobBar" class="jobbar hidden"></section>
+
+      <!-- ================================================= Friends -->
+      <section class="view" data-view="friends">
+        <section id="checklist" class="checklist hidden">
+          <div class="checkhead">
+            <strong>Getting started</strong>
+            <button id="btnChecklistHide" class="linkbtn">Hide</button>
           </div>
-          <div id="tokenNew" class="tokennew hidden"></div>
-          <ul id="tokenList" class="tokenlist"></ul>
-        </div>
-        <details class="example">
-          <summary>Example request</summary>
-          <pre id="inboundExample"></pre>
-        </details>
-        <div class="group">
-          <button id="btnInboundPoll" class="ghost small">Check for requests now</button>
-          <span id="inboundStatus" class="inline"></span>
-        </div>
-        <p class="diag" id="inboundSetup"></p>
-      </div>
-    </details>
-    <details id="logPanel">
-      <summary>Activity log <span id="logCount" class="count"></span></summary>
-      <div class="settings auto">
-        <div class="group">
-          <label class="inline">Show
-            <select id="logFilter">
-              <option value="all">everything</option>
-              <option value="manual">started by me</option>
-              <option value="schedule">scheduled</option>
-              <option value="webhook">webhooks</option>
-              <option value="problems">problems only</option>
+          <ol>
+            <li id="ckFriends"><span class="tick"></span><div><b>Scan your friends</b><span>Reads your list, the order you added people and when you became friends.</span></div><button id="ckFriendsBtn" class="primary small">Scan friends</button></li>
+            <li id="ckEngagement"><span class="tick"></span><div><b>Scan engagement</b><span>Checks who reacted to or commented on your recent posts.</span></div><button id="ckEngagementBtn" class="primary small">Scan engagement</button></li>
+            <li id="ckReview"><span class="tick"></span><div><b>Review suggestions</b><span>Go through the people who haven't engaged, one at a time. Keep, remove or skip.</span></div><button id="ckReviewBtn" class="primary small">Start review</button></li>
+          </ol>
+        </section>
+
+        <section class="toolbar">
+          <div class="group">
+            <button id="btnScanFriends" class="primary" title="Reads your friends list, the order you added them, and (from your Activity Log) the date you became friends">1 · Scan friends</button>
+            <button id="btnScanEngagement" class="primary">2 · Scan engagement</button>
+            <label class="inline">scan back:
+              <select id="scanDays">
+                <option value="7">1 week</option>
+                <option value="14">2 weeks</option>
+                <option value="30" selected>1 month</option>
+                <option value="60" data-pro="1">2 months</option>
+                <option value="90" data-pro="1">3 months</option>
+                <option value="180" data-pro="1">6 months</option>
+                <option value="365" data-pro="1">1 year</option>
+              </select>
+            </label>
+          </div>
+          <div class="group">
+            <button id="btnReview" class="accent" title="Go through suggestions one at a time">Review suggestions</button>
+          </div>
+        </section>
+
+        <section class="selectionbar">
+          <div class="group">
+            <button id="btnRemove" class="danger" disabled>Remove selected (0)</button>
+            <button id="btnProtect" class="protect-btn" disabled>Protect selected (0)</button>
+            <button id="btnUnprotect" class="unprotect-btn" disabled>Unprotect selected (0)</button>
+            <button id="btnToCrm" class="ghost" disabled title="Download the selection as a contacts file for Not Another Social CRM, tagged so you can reconnect instead of removing">Send to CRM (0)</button>
+            <button id="btnExport" class="ghost">Export CSV</button>
+          </div>
+          <div class="dailymeter" id="dailyMeter" title="Removals today against your daily limit (Settings). Spreading removals over days keeps your account safe.">
+            <span id="dailyText"></span>
+            <span class="meter"><span id="dailyFill"></span></span>
+          </div>
+        </section>
+
+        <section class="filters">
+          <input type="search" id="search" placeholder="Search name…" />
+          <label><input type="checkbox" id="fltNoEngagement" /> No engagement only</label>
+          <label><input type="checkbox" id="fltHideRemoved" checked /> Hide removed</label>
+          <label><input type="checkbox" id="fltHideProtected" checked /> Hide protected</label>
+          <label id="fltFailedWrap" class="fltfailed hidden"><input type="checkbox" id="fltFailed" /> Removal failed only <span id="fltFailedCount" class="count"></span></label>
+          <select id="sortBy">
+            <option value="score-asc">Least engaged first</option>
+            <option value="score-desc">Most engaged first</option>
+            <option value="recent">Last engaged (newest first)</option>
+            <option value="stale">Last engaged (oldest first)</option>
+            <option value="friended-new">Newest friends first</option>
+            <option value="friended-old">Oldest friends first</option>
+            <option value="name">Name A–Z</option>
+          </select>
+          <label class="selall"><input type="checkbox" id="selAll" /> Select all on page</label>
+          <a href="#" id="selAllMatch" class="selall-match hidden"></a>
+        </section>
+
+        <section class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th></th>
+                <th>Name</th>
+                <th>Reactions</th>
+                <th>Comments</th>
+                <th>Score</th>
+                <th>Last engaged</th>
+                <th title="Date you became friends (from your Activity Log, read by Scan friends). Falls back to #N recency rank from the 'Recently added' list — #1 is your newest friend">Friended</th>
+                <th>Status</th>
+                <th title="Protect a friend so they're never suggested or removed">Protect</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <div id="empty" class="empty hidden">
+            No friends scanned yet. Log in to Facebook in this browser, then click
+            <strong>1 · Scan friends</strong>. A Facebook tab will open and load
+            your friends list, then your Activity Log for friend dates — leave it
+            alone until the overlay says it's done.
+          </div>
+          <div id="noMatch" class="empty hidden">No friends match the current filters.</div>
+        </section>
+
+        <section id="pager" class="pager hidden">
+          <span id="pageInfo" class="pageinfo"></span>
+          <label class="inline">per page:
+            <select id="pageSize">
+              <option>25</option>
+              <option selected>50</option>
+              <option>100</option>
+              <option>200</option>
             </select>
           </label>
-          <button id="btnLogClear" class="ghost small">Clear log</button>
+          <div class="pgnav">
+            <button id="pgFirst" class="ghost pg">« First</button>
+            <button id="pgPrev" class="ghost pg">‹ Prev</button>
+            <span id="pageNum" class="pagenum"></span>
+            <button id="pgNext" class="ghost pg">Next ›</button>
+            <button id="pgLast" class="ghost pg">Last »</button>
+          </div>
+        </section>
+      </section>
+
+      <!-- ================================================= Activity -->
+      <section class="view hidden" data-view="activity">
+        <div class="panel" id="logPanel">
+          <div class="panelhead">
+            <h2>Activity log <span id="logCount" class="count"></span></h2>
+            <div class="group">
+              <label class="inline">Show
+                <select id="logFilter">
+                  <option value="all">everything</option>
+                  <option value="manual">started by me</option>
+                  <option value="schedule">scheduled</option>
+                  <option value="webhook">webhooks</option>
+                  <option value="problems">problems only</option>
+                </select>
+              </label>
+              <button id="btnLogClear" class="ghost small">Clear log</button>
+            </div>
+          </div>
+          <table class="log">
+            <thead><tr><th>When</th><th>What</th><th>Started by</th><th>Result</th></tr></thead>
+            <tbody id="logRows"></tbody>
+          </table>
+          <p id="logEmpty" class="hint hidden">Nothing yet. Every scan and removal is recorded here, with who or what started it.</p>
         </div>
-        <table class="log">
-          <thead><tr><th>When</th><th>What</th><th>Started by</th><th>Result</th></tr></thead>
-          <tbody id="logRows"></tbody>
-        </table>
-        <p id="logEmpty" class="note hidden">Nothing yet. Every scan and removal is recorded here, with who or what started it.</p>
-      </div>
-    </details>
-    <details>
-      <summary>Google Drive sync</summary>
-      <div class="settings">
-        <p class="note" id="driveInfo"></p>
-        <div class="group">
-          <button id="btnDriveConnect">Connect Google Drive</button>
-          <button id="btnDriveDisconnect" class="ghost hidden">Disconnect</button>
+      </section>
+
+      <!-- ================================================= Automations -->
+      <section class="view hidden" data-view="automations">
+        <div class="panel">
+          <div class="panelhead"><h2>Scheduled scans <span id="schedProTag" class="protag hidden">Pro</span></h2></div>
+          <div class="settings auto">
+            <p id="schedProNote" class="pronote hidden">
+              Scheduled scans are part of Pro. <a href="#" id="schedUpgrade">Upgrade</a> to have scans re-run on their own.
+            </p>
+            <label class="switch">
+              <span>Re-scan on a schedule</span>
+              <input type="checkbox" id="autoEnabled" />
+            </label>
+            <label>Run every
+              <select id="autoEvery">
+                <option value="6">6 hours</option>
+                <option value="12">12 hours</option>
+                <option value="24" selected>day</option>
+                <option value="72">3 days</option>
+                <option value="168">week</option>
+              </select>
+            </label>
+            <label>Engagement window
+              <select id="autoDays">
+                <option value="7">1 week</option>
+                <option value="14">2 weeks</option>
+                <option value="30" selected>1 month</option>
+                <option value="60" data-pro="1">2 months</option>
+                <option value="90" data-pro="1">3 months</option>
+                <option value="180" data-pro="1">6 months</option>
+                <option value="365" data-pro="1">1 year</option>
+              </select>
+            </label>
+            <fieldset class="scanpick">
+              <legend>Scans to run</legend>
+              <label><input type="checkbox" id="autoScanFriends" /> Friends (list, order and dates)</label>
+              <label><input type="checkbox" id="autoScanEngagement" /> Engagement</label>
+            </fieldset>
+            <div class="group">
+              <button id="btnRunSchedule" class="ghost">Run now</button>
+              <span id="autoNext" class="inline"></span>
+            </div>
+            <p class="hint">
+              Scheduled runs open a Facebook tab and take focus while they scroll,
+              so pick a cadence you won't mind interrupting you. Only scans can be
+              scheduled — removals only ever run when you start them. A run that comes
+              due while another job is going waits for it to finish. Runs only fire
+              while Chrome is open.
+            </p>
+          </div>
         </div>
-        <p class="diag" id="driveDiag"></p>
+
+        <div class="panel" id="inboundPanel">
+          <div class="panelhead"><h2>Incoming webhooks <span id="inboundProTag" class="protag hidden">Pro</span> <span class="betatag">Beta</span></h2></div>
+          <div class="settings auto wide">
+            <p class="hint">
+              Start a scan from anywhere — Zapier, a script, a phone shortcut — by
+              sending a request to your private web address. This browser checks for
+              requests once a minute while Chrome is open, runs them one at a time,
+              and records each one in the activity log. Only scans can be started
+              this way; removals never run remotely.
+            </p>
+            <p id="inboundProNote" class="pronote hidden">
+              Incoming webhooks are part of Pro. <a href="#" id="inboundUpgrade">Upgrade</a> to trigger scans remotely.
+            </p>
+            <label class="switch">
+              <span>This browser answers webhooks</span>
+              <input type="checkbox" id="inboundEnabled" />
+            </label>
+            <fieldset class="scanpick" id="inboundCommands">
+              <legend>Requests it will run</legend>
+            </fieldset>
+            <div class="endpoint">
+              <span class="inline">Send requests to</span>
+              <code id="inboundEndpoint">…</code>
+              <button id="btnCopyEndpoint" class="ghost small">Copy</button>
+            </div>
+            <div class="tokens">
+              <div class="group">
+                <strong>Tokens</strong>
+                <input type="text" id="tokenLabel" placeholder="Label, e.g. Zapier" maxlength="60" />
+                <button id="btnTokenCreate" class="ghost small">Create token</button>
+              </div>
+              <div id="tokenNew" class="tokennew hidden"></div>
+              <ul id="tokenList" class="tokenlist"></ul>
+            </div>
+            <details class="example">
+              <summary>Example request</summary>
+              <pre id="inboundExample"></pre>
+            </details>
+            <div class="group">
+              <button id="btnInboundPoll" class="ghost small">Check for requests now</button>
+              <span id="inboundStatus" class="inline"></span>
+            </div>
+            <p class="diag" id="inboundSetup"></p>
+          </div>
+        </div>
+
+        <div class="panel" id="notifyPanel">
+          <div class="panelhead"><h2>When a job finishes</h2></div>
+          <div class="settings auto wide">
+            <p class="hint">
+              Hear about runs you weren't watching. Both settings are for this browser only.
+            </p>
+            <label class="switch">
+              <span>Show a desktop notification</span>
+              <input type="checkbox" id="notifyDesktop" />
+            </label>
+            <label class="stack">Send the result to a web address (Zapier "Catch hook", Make, your server)
+              <input type="url" id="notifyUrl" placeholder="https://hooks.zapier.com/hooks/catch/…" />
+            </label>
+            <label>Send for
+              <select id="notifyOn">
+                <option value="all">every job</option>
+                <option value="unattended">scheduled and webhook runs only</option>
+              </select>
+            </label>
+            <div class="group">
+              <button id="btnNotifySave" class="ghost small">Save address</button>
+              <button id="btnNotifyTest" class="ghost small">Send a test</button>
+              <span id="notifyStatus" class="inline"></span>
+            </div>
+            <details class="example">
+              <summary>What gets sent</summary>
+              <pre>{
+  "event": "job.finished",           // or job.failed, job.cancelled
+  "job": { "type": "engagementScan", "trigger": "schedule",
+           "summary": "52 posts checked, 31 new reactions/comments", … },
+  "suggestions": {                    // after an engagement scan
+    "total": 87,
+    "friends": [ { "name": "…", "url": "…", "friendedAt": "2014-03-02" }, … ]
+  }
+}</pre>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================= Settings -->
+      <section class="view hidden" data-view="settings">
+        <div class="panel">
+          <div class="panelhead"><h2>Removal safety</h2></div>
+          <div class="settings">
+            <label>Max removals per run
+              <input type="number" id="setMaxRemovals" min="1" max="100" />
+            </label>
+            <label>Max removals per day
+              <input type="number" id="setMaxPerDay" min="1" max="200" />
+            </label>
+            <label>Delay between removals (seconds, min)
+              <input type="number" id="setDelayMin" min="30" max="600" />
+            </label>
+            <label>Delay between removals (seconds, max)
+              <input type="number" id="setDelayMax" min="30" max="900" />
+            </label>
+            <button id="btnSaveSettings" class="primary">Save</button>
+            <p class="note">
+              Removals are paced with randomized delays (never faster than ~30s),
+              capped per run and per day, and wait 30 seconds before starting so
+              you can undo. Facebook's terms restrict tools like this one, and going
+              too fast can get your account temporarily action-blocked. Keep runs
+              small (10–20) and spread them across days.
+            </p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panelhead"><h2>Google Drive sync</h2></div>
+          <div class="settings">
+            <p class="hint" id="driveInfo"></p>
+            <div class="group">
+              <button id="btnDriveConnect">Connect Google Drive</button>
+              <button id="btnDriveDisconnect" class="ghost hidden">Disconnect</button>
+            </div>
+            <p class="diag" id="driveDiag"></p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panelhead"><h2>Data &amp; diagnostics</h2></div>
+          <div class="settings">
+            <p class="diag" id="docIdDiag"></p>
+            <button id="btnWipe" class="danger ghost">Delete all friend data (every synced browser)</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ================================================= Review mode -->
+  <div id="review" class="review hidden" role="dialog" aria-modal="true" aria-labelledby="rvName">
+    <div class="reviewcard">
+      <div class="rvtop">
+        <span id="rvProgress" class="rvprogress"></span>
+        <button id="rvClose" class="linkbtn" title="Close (Esc). Your choices so far are kept.">Close</button>
       </div>
-    </details>
-    <details>
-      <summary>Settings &amp; safety</summary>
-      <div class="settings">
-        <label>Max removals per run
-          <input type="number" id="setMaxRemovals" min="1" max="100" />
-        </label>
-        <label>Delay between removals (seconds, min)
-          <input type="number" id="setDelayMin" min="30" max="600" />
-        </label>
-        <label>Delay between removals (seconds, max)
-          <input type="number" id="setDelayMax" min="30" max="900" />
-        </label>
-        <button id="btnSaveSettings">Save</button>
-        <p class="note">
-          Removals are paced with randomized delays (never faster than ~30s)
-          and capped per run. Facebook's terms restrict tools like this one,
-          and going too fast can get your account temporarily
-          action-blocked. Keep runs small (10–20) and spread them across days.
-        </p>
-        <p class="diag" id="docIdDiag"></p>
-        <button id="btnWipe" class="danger ghost">Delete all friend data (every synced browser)</button>
+      <div class="rvbar"><span id="rvBarFill"></span></div>
+      <div id="rvBody" class="rvbody">
+        <div class="rvperson">
+          <img id="rvPhoto" alt="" />
+          <div>
+            <a id="rvName" target="_blank" rel="noopener"></a>
+            <div id="rvWhy" class="why"></div>
+          </div>
+        </div>
+        <dl class="rvfacts">
+          <div><dt>Reactions</dt><dd id="rvReactions"></dd></div>
+          <div><dt>Comments</dt><dd id="rvComments"></dd></div>
+          <div><dt>Last engaged</dt><dd id="rvLast"></dd></div>
+          <div><dt>Friends since</dt><dd id="rvSince"></dd></div>
+        </dl>
+        <div class="rvactions">
+          <button id="rvKeep" class="protect-btn big" title="Protect them — they won't be suggested again (K)">Keep <kbd>K</kbd></button>
+          <button id="rvSkip" class="ghost big" title="Decide later (S or →)">Skip <kbd>S</kbd></button>
+          <button id="rvRemove" class="danger big" title="Add to the removal list (R)">Remove <kbd>R</kbd></button>
+        </div>
+        <div class="rvnav">
+          <button id="rvBack" class="linkbtn" title="Previous person (←)">‹ Back</button>
+          <span id="rvChoice" class="rvchoice"></span>
+        </div>
       </div>
-    </details>
-  </footer>
+      <div id="rvDone" class="rvdone hidden">
+        <h2>That's everyone</h2>
+        <p id="rvSummary"></p>
+      </div>
+      <div class="rvfoot">
+        <span id="rvTally" class="inline"></span>
+        <button id="rvFinish" class="danger" disabled>Remove 0</button>
+      </div>
+    </div>
+  </div>
 
   <script src="dashboard.js"></script>
 </body>

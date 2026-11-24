@@ -9,6 +9,12 @@
     "alarms",
     "identity"
   ],
+  "optional_permissions": [
+    "notifications"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://web.facebook.com/*"
