@@ -10,6 +10,7 @@ async function render() {
   $("signedOut").classList.toggle("hidden", !!a.signedIn);
   $("signedIn").classList.toggle("hidden", !a.signedIn);
   $("signOut").classList.toggle("hidden", !a.signedIn);
+  $("account").classList.toggle("hidden", !a.signedIn);
   if (!a.signedIn) return;
 
   const usage = a.isPro
@@ -37,6 +38,11 @@ $("open").addEventListener("click", () => {
 });
 $("upgrade").addEventListener("click", () => {
   chrome.runtime.sendMessage({ cmd: "openBilling" });
+  window.close();
+});
+$("account").addEventListener("click", (e) => {
+  e.preventDefault();
+  chrome.runtime.sendMessage({ cmd: "openAccount" });
   window.close();
 });
 $("help").addEventListener("click", (e) => {

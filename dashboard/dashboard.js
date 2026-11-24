@@ -87,7 +87,10 @@ function renderAccount() {
   $("btnExport").textContent = a.csvExport ? "Export CSV" : "Export CSV (Pro)";
   $("schedProTag").classList.toggle("hidden", !!a.scheduledScans);
   $("schedProNote").classList.toggle("hidden", !!a.scheduledScans);
+  $("inboundProTag").classList.toggle("hidden", !!a.scheduledScans);
+  $("inboundProNote").classList.toggle("hidden", !!a.scheduledScans);
   renderSchedule();
+  renderInbound();
 }
 
 function upgradePrompt(message) {
@@ -113,6 +116,9 @@ async function runCmd(msg) {
 $("btnLockSignIn").addEventListener("click", () => chrome.runtime.sendMessage({ cmd: "signIn" }));
 $("acctUpgrade").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
 $("acctBilling").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
+for (const id of ["acctAccount", "acctEmail"]) {
+  $(id).addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openAccount" }); });
+}
 $("acctHelp").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openSupport" }); });
 $("schedUpgrade").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
 $("acctSignOut").addEventListener("click", async (e) => {
@@ -323,10 +329,13 @@ function visibleRows() {
       rank: typeof f.recentRank === "number" ? f.recentRank : null,
       friendedAt: f.friendedAt || null,
       whitelisted: !!f.whitelisted,
+      // Still a friend after the extension tried and failed to remove them.
+      removeFailed: !f.removedAt && !!f.removeFailedAt,
     };
   });
 
   if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q));
+  if ($("fltFailed").checked) rows = rows.filter((r) => r.removeFailed);
   if (noEng) rows = rows.filter((r) => r.score === 0);
   if (hideRemoved) rows = rows.filter((r) => !r.removedAt);
   if (hideProtected) rows = rows.filter((r) => !r.whitelisted);
@@ -369,9 +378,17 @@ function render() {
   const removed = Object.values(friends).filter((f) => f.removedAt).length;
   const protectedCount = Object.values(friends).filter((f) => f.whitelisted).length;
   const scannedEvents = Object.keys(engagement).length;
+  const failedCount = Object.values(friends).filter((f) => !f.removedAt && f.removeFailedAt).length;
   $("stats").innerHTML =
     `<b>${total}</b> friends · <b>${scannedEvents}</b> engagement events · ` +
-    `<b>${protectedCount}</b> protected · <b>${removed}</b> removed`;
+    `<b>${protectedCount}</b> protected · <b>${removed}</b> removed` +
+    (failedCount ? ` · <a href="#" id="statFailed" class="statfailed"><b>${failedCount}</b> couldn't be removed</a>` : "");
+  const statFailed = $("statFailed");
+  if (statFailed) statFailed.addEventListener("click", (e) => { e.preventDefault(); showFailedRemovals(); });
+  // The filter only appears while there's something for it to find.
+  $("fltFailedWrap").classList.toggle("hidden", failedCount === 0);
+  $("fltFailedCount").textContent = failedCount ? `(${failedCount})` : "";
+  if (!failedCount) $("fltFailed").checked = false;
 
   $("empty").classList.toggle("hidden", total > 0);
   // "No matches" only applies once there are friends but the filters hide them.
@@ -392,6 +409,7 @@ function render() {
   for (const r of rows) {
     const tr = document.createElement("tr");
     if (r.removedAt) tr.className = "removed";
+    else if (r.removeFailed) tr.className = "failed";
 
     const tdSel = document.createElement("td");
     const cb = document.createElement("input");
@@ -446,15 +464,19 @@ function render() {
       tdRank.title = "Date friended (from your Activity Log)";
     } else if (r.rank !== null) {
       tdRank.textContent = "#" + (r.rank + 1);
-      tdRank.title = `${r.rank + 1} of your most recently added friends — run "Scan friend dates" for the exact date`;
+      tdRank.title = `${r.rank + 1} of your most recently added friends — Facebook didn't show an exact date for this one`;
     } else {
       tdRank.textContent = "—";
-      tdRank.title = "No friend-date data — run the friend and friend-dates scans";
+      tdRank.title = "No friend-date data yet — run Scan friends";
     }
 
     const tdStatus = document.createElement("td");
     if (r.removedAt) {
-      tdStatus.innerHTML = '<span class="badge removed">removed</span>';
+      tdStatus.innerHTML = r.removedManually
+        ? '<span class="badge removed" title="You removed them on Facebook and marked it here">removed by hand</span>'
+        : '<span class="badge removed">removed</span>';
+    } else if (r.removeFailed) {
+      tdStatus.appendChild(failedRemovalCell(r));
     } else if (r.whitelisted) {
       tdStatus.innerHTML = '<span class="badge protected">protected</span>';
     } else if (hasEngagementData && r.score === 0) {
@@ -575,12 +597,82 @@ function updateActionButtons() {
   uBtn.disabled = unprotectable.length === 0;
 }
 
+// The status cell for a friend the extension couldn't remove: what went wrong,
+// and the two ways out — do it by hand on Facebook, or decide to keep them.
+// (Re-selecting them and pressing Remove selected retries automatically.)
+function failedRemovalCell(r) {
+  const wrap = document.createElement("div");
+  wrap.className = "failcell";
+  const badge = document.createElement("span");
+  badge.className = "badge failed";
+  badge.textContent = "removal failed";
+  badge.title = (r.removeError ? "Facebook said: " + r.removeError + "\n" : "") +
+    "Tried " + fmtWhen(r.removeFailedAt) + ". Select them and press Remove selected to retry, or remove them by hand.";
+  wrap.appendChild(badge);
+
+  const open = document.createElement("a");
+  open.className = "failaction";
+  open.href = r.url;
+  open.target = "_blank";
+  open.textContent = "Remove on Facebook ↗";
+  open.title = "Opens their profile. Use Friends ▸ Unfriend there, then come back and press Mark removed.";
+  wrap.appendChild(open);
+
+  const mark = document.createElement("button");
+  mark.className = "failaction primary small";
+  mark.textContent = "Mark removed";
+  mark.title = "You've unfriended them on Facebook yourself";
+  mark.addEventListener("click", async () => {
+    if (!confirm(`Mark ${r.name} as removed?\n\nOnly do this once you've unfriended them on Facebook — the extension can't check.`)) return;
+    await runCmd({ cmd: "markRemoved", keys: [r.key] });
+  });
+  wrap.appendChild(mark);
+
+  const keep = document.createElement("button");
+  keep.className = "failaction ghost small";
+  keep.textContent = "Keep";
+  keep.title = "Stop flagging this person — you've decided to stay friends";
+  keep.addEventListener("click", () => chrome.runtime.sendMessage({ cmd: "clearRemoveFailed", keys: [r.key] }));
+  wrap.appendChild(keep);
+  return wrap;
+}
+
+// Jump the list to just the people a removal couldn't get to.
+function showFailedRemovals() {
+  $("fltFailed").checked = true;
+  $("fltHideRemoved").checked = true;
+  $("search").value = "";
+  page = 1;
+  render();
+  $("rows").closest(".tablewrap").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const TRIGGER_LABELS = { manual: "", schedule: "Scheduled · ", webhook: "Webhook · " };
+
+function jobHeadline(j) {
+  const p = j.progress || {};
+  if (j.type === "friendScan") {
+    const step = { all: "1 of 3: friends list", recent: "2 of 3: friend order", dates: "3 of 3: friend dates" }[j.phase] || "";
+    const counts = `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} dated` : "");
+    return j.status === "running"
+      ? `Scanning friends — step ${step} — ${counts}`
+      : `Friend scan ${j.status} — ${counts}`;
+  }
+  if (j.type === "friendDatesScan") return `Friend-dates scan ${j.status} — ${p.dated || 0} friends dated`;
+  if (j.type === "engagementScan") {
+    const win = j.days ? ` (${j.days}-day window)` : "";
+    return `Engagement scan ${j.status}${win} — ${p.posts || 0} posts, ${p.events || 0} new events`;
+  }
+  if (j.type === "removal") {
+    const verb = j.status === "running" ? "Removing friends" : `Removal ${j.status}`;
+    return `${verb} — ${p.done || 0} of ${p.total || 0} removed` + (p.failed ? `, ${p.failed} failed` : "");
+  }
+  return "";
+}
+
 function renderJob() {
   const bar = $("jobBar");
   const running = !!(job && job.status === "running");
-  // Cancelling only means something while work is actually in flight.
-  $("btnCancel").disabled = !running;
-  $("btnCancel").title = running ? "" : "No job is running";
 
   if (!job) {
     if (jobDismissTimer) {
@@ -593,24 +685,13 @@ function renderJob() {
   }
   bar.classList.remove("hidden", "error", "finished");
   bar.textContent = "";
-  let text = "";
   const p = job.progress || {};
-  if (job.type === "friendScan") {
-    const phase = job.phase === "recent" ? " (capturing friend order)" : "";
-    text = `Friend scan ${job.status}${phase} — ${p.found || 0} friends found`;
-  } else if (job.type === "friendDatesScan") {
-    text = `Friend-dates scan ${job.status} — ${p.dated || 0} friends dated`;
-  } else if (job.type === "engagementScan") {
-    const win = job.days ? ` (${job.days}d window)` : "";
-    text = `Engagement scan ${job.status}${win} — ${p.posts || 0} posts, ${p.events || 0} new events`;
-  } else if (job.type === "removal") {
-    text = `Removal ${job.status} — ${p.done || 0}/${p.total || 0} removed` +
-      (p.failed ? `, ${p.failed} failed` : "");
-    if (job.status === "running" && job.nextStepAt && job.nextStepAt > Date.now()) {
-      text += ` · next in ~${Math.round((job.nextStepAt - Date.now()) / 1000)}s`;
-    }
+  const trigger = job.trigger || (job.auto ? "schedule" : "manual");
+  let text = (TRIGGER_LABELS[trigger] || "") + jobHeadline(job);
+  if (job.inbound && job.inbound.label && trigger === "webhook") text = text.replace(/^Webhook · /, `Webhook (${job.inbound.label}) · `);
+  if (job.type === "removal" && running && job.nextStepAt && job.nextStepAt > Date.now()) {
+    text += ` · next in ~${Math.round((job.nextStepAt - Date.now()) / 1000)}s`;
   }
-  if (job.auto) text = "Scheduled · " + text;
   if (Array.isArray(job.chain) && job.chain.length) {
     text += ` · ${job.chain.length} more scan${job.chain.length === 1 ? "" : "s"} queued`;
   }
@@ -625,13 +706,61 @@ function renderJob() {
     bar.classList.add("error");
     text += ` — ${warnings.join("; ")}`;
   }
-  if (job.status === "finished") bar.classList.add("finished");
+  // A removal that left people behind isn't a green "all done".
+  const leftBehind = job.type === "removal" && (p.failed || 0) > 0;
+  if (job.status === "finished" && !leftBehind) bar.classList.add("finished");
 
+  const body = document.createElement("div");
+  body.className = "jobbody";
   const label = document.createElement("span");
   label.textContent = text;
-  bar.appendChild(label);
+  body.appendChild(label);
 
-  if (!running) {
+  // Removals are the slow, nervous operation: show how far along it is.
+  if (job.type === "removal" && p.total) {
+    const track = document.createElement("div");
+    track.className = "jobprogress";
+    const doneBar = document.createElement("span");
+    doneBar.className = "ok";
+    doneBar.style.width = `${(100 * (p.done || 0)) / p.total}%`;
+    const failBar = document.createElement("span");
+    failBar.className = "bad";
+    failBar.style.width = `${(100 * (p.failed || 0)) / p.total}%`;
+    track.append(doneBar, failBar);
+    body.appendChild(track);
+  }
+  bar.appendChild(body);
+
+  const actions = document.createElement("div");
+  actions.className = "jobactions";
+  bar.appendChild(actions);
+
+  // A removal that left people behind points straight at them.
+  const failedRemovals = job.type === "removal" && (p.failed || 0) > 0;
+  if (failedRemovals && !running) {
+    bar.classList.add("error");
+    const show = document.createElement("button");
+    show.className = "small";
+    show.textContent = `Show the ${p.failed} still to remove`;
+    show.addEventListener("click", showFailedRemovals);
+    actions.appendChild(show);
+  }
+
+  if (running) {
+    // Cancel lives with the job it cancels.
+    const cancel = document.createElement("button");
+    cancel.className = "ghost small jobcancel";
+    cancel.textContent = job.type === "removal" ? "Stop removing" : "Cancel";
+    cancel.title = job.type === "removal"
+      ? "Stops after the current friend. Anyone already removed stays removed."
+      : "Stops this scan. What it found so far is kept.";
+    cancel.addEventListener("click", async () => {
+      if (job.type === "removal" && !confirm("Stop removing friends?\n\nAnyone already removed stays removed.")) return;
+      cancel.disabled = true;
+      await chrome.runtime.sendMessage({ cmd: "cancelJob" });
+    });
+    actions.appendChild(cancel);
+  } else {
     // A job that has ended clears itself; the × is just for the impatient (and
     // for errors, which stay put until they've been read). Mid-chain it's also
     // the way to call off the scans still queued behind this one.
@@ -641,10 +770,10 @@ function renderJob() {
     x.textContent = "×";
     x.title = chained ? "Stop the remaining scans" : "Dismiss";
     x.addEventListener("click", dismissJob);
-    bar.appendChild(x);
+    actions.appendChild(x);
     // Auto-dismissing a chained job would clear the job the next scan is
     // waiting on, so leave it up until the chain moves on by itself.
-    if (job.status === "finished" && !chained && !warnings.length) scheduleJobDismiss();
+    if (job.status === "finished" && !chained && !warnings.length && !failedRemovals) scheduleJobDismiss();
   }
 }
 
@@ -722,7 +851,6 @@ function renderDocIdDiag() {
 
 const SCAN_BOXES = {
   friendScan: "autoScanFriends",
-  friendDatesScan: "autoScanDates",
   engagementScan: "autoScanEngagement",
 };
 
@@ -808,8 +936,6 @@ async function toggleWhitelist(key) {
 
 $("btnScanFriends").addEventListener("click", () => runCmd({ cmd: "startFriendScan" }));
 
-$("btnScanDates").addEventListener("click", () => runCmd({ cmd: "startFriendDatesScan" }));
-
 $("btnScanEngagement").addEventListener("click", () =>
   runCmd({
     cmd: "startEngagementScan",
@@ -870,10 +996,6 @@ $("btnUnprotect").addEventListener("click", async () => {
   setProtected(unprotectable, false);
   render();
 });
-
-$("btnCancel").addEventListener("click", () =>
-  chrome.runtime.sendMessage({ cmd: "cancelJob" })
-);
 
 $("btnExport").addEventListener("click", () => {
   if (!account || !account.csvExport) {
@@ -946,7 +1068,7 @@ $("pageSize").addEventListener("change", async () => {
 });
 
 // Changing a filter, search, or sort resets to the first page.
-for (const id of ["search", "fltNoEngagement", "fltHideRemoved", "fltHideProtected", "sortBy"]) {
+for (const id of ["search", "fltNoEngagement", "fltHideRemoved", "fltHideProtected", "fltFailed", "sortBy"]) {
   $(id).addEventListener("input", () => { page = 1; render(); });
 }
 
@@ -970,6 +1092,218 @@ $("btnWipe").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ cmd: "wipeAll" });
   selected.clear();
   load();
+});
+
+// ------------------------------------------------------------- incoming webhooks
+
+let inbound = null; // { settings, status, endpointUrl, commands }
+let inboundTokens = null; // null = not loaded; { error } or { list }
+
+async function loadInbound() {
+  const resp = await chrome.runtime.sendMessage({ cmd: "inboundInfo" }).catch(() => null);
+  inbound = resp && resp.ok ? resp : null;
+  renderInbound();
+}
+
+async function loadTokens() {
+  const resp = await chrome.runtime.sendMessage({ cmd: "inboundTokens" }).catch(() => null);
+  inboundTokens = resp && resp.ok ? { list: resp.tokens } : { error: (resp && resp.error) || "No response" };
+  renderInbound();
+}
+
+function renderInbound() {
+  if (!inbound) return;
+  const allowed = !!(account && account.scheduledScans);
+  const s = inbound.settings || {};
+  $("inboundEnabled").checked = !!s.enabled;
+  $("inboundEnabled").disabled = !allowed;
+  $("btnInboundPoll").disabled = !allowed || !s.enabled;
+  $("btnTokenCreate").disabled = !allowed;
+  $("inboundEndpoint").textContent = inbound.endpointUrl;
+
+  const box = $("inboundCommands");
+  box.querySelectorAll("label").forEach((l) => l.remove());
+  for (const [cmd, label] of Object.entries(inbound.commands || {})) {
+    const l = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = (s.allowed || []).includes(cmd);
+    cb.disabled = !allowed || !s.enabled;
+    cb.addEventListener("change", () => {
+      const next = new Set(s.allowed || []);
+      cb.checked ? next.add(cmd) : next.delete(cmd);
+      saveInbound({ allowed: [...next] });
+    });
+    const code = document.createElement("code");
+    code.textContent = cmd;
+    l.append(cb, " ", code, " — " + label);
+    box.appendChild(l);
+  }
+
+  $("inboundExample").textContent =
+    `curl -X POST ${inbound.endpointUrl} \\\n` +
+    `  -H "Authorization: Bearer <your token>" \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -d '{"command":"scan.engagement","payload":{"days":30}}'\n\n` +
+    `# Replies 202 with an id. Check how it went:\n` +
+    `curl "${inbound.endpointUrl}?id=<id>" -H "Authorization: Bearer <your token>"`;
+
+  const st = inbound.status;
+  const parts = [];
+  if (!s.enabled) parts.push("Off in this browser");
+  else if (!st) parts.push("Waiting for the first check…");
+  else {
+    if (st.ok === false) parts.push("Last check failed: " + st.error);
+    else if (st.skipped === "busy") parts.push("A job is running — requests wait until it's done");
+    else if (st.skipped === "signed-out") parts.push("Signed out");
+    else if (st.skipped === "not-pro") parts.push("Needs Pro");
+    else parts.push("Checked " + fmtWhen(st.at));
+    if (st.last) parts.push(`last request: ${st.last.command} (${st.last.status === "pending" ? "running" : st.last.status}) ${fmtWhen(st.last.at)}`);
+  }
+  $("inboundStatus").textContent = parts.join(" · ");
+
+  const list = $("tokenList");
+  list.textContent = "";
+  $("inboundSetup").textContent = "";
+  if (inboundTokens && inboundTokens.error) {
+    $("inboundSetup").textContent = inboundTokens.error;
+  } else if (inboundTokens && inboundTokens.list) {
+    const live = inboundTokens.list.filter((t) => !t.revoked_at);
+    if (!live.length) {
+      const li = document.createElement("li");
+      li.className = "note";
+      li.textContent = "No tokens yet. Create one for each tool you connect, so you can switch one off without breaking the rest.";
+      list.appendChild(li);
+    }
+    for (const t of live) {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.innerHTML = `<b></b> <code></code> <span class="inline"></span>`;
+      name.querySelector("b").textContent = t.label || "Untitled";
+      name.querySelector("code").textContent = t.token_prefix + "…";
+      name.querySelector(".inline").textContent =
+        t.last_used_at ? "last used " + fmtWhen(Date.parse(t.last_used_at)) : "never used";
+      const revoke = document.createElement("button");
+      revoke.className = "ghost small danger-text";
+      revoke.textContent = "Revoke";
+      revoke.addEventListener("click", async () => {
+        if (!confirm(`Revoke "${t.label || t.token_prefix}"?\n\nAnything still using it will get "invalid token" from now on.`)) return;
+        await runCmd({ cmd: "inboundTokenRevoke", id: t.id });
+        loadTokens();
+      });
+      li.append(name, revoke);
+      list.appendChild(li);
+    }
+  }
+}
+
+async function saveInbound(patch) {
+  const resp = await runCmd({ cmd: "inboundSetSettings", patch });
+  if (resp && resp.ok) inbound.settings = resp.settings;
+  renderInbound();
+}
+
+$("inboundEnabled").addEventListener("change", () => saveInbound({ enabled: $("inboundEnabled").checked }));
+$("inboundUpgrade").addEventListener("click", (e) => { e.preventDefault(); chrome.runtime.sendMessage({ cmd: "openBilling" }); });
+$("btnCopyEndpoint").addEventListener("click", async () => {
+  await navigator.clipboard.writeText($("inboundEndpoint").textContent).catch(() => {});
+  $("btnCopyEndpoint").textContent = "Copied";
+  setTimeout(() => ($("btnCopyEndpoint").textContent = "Copy"), 1500);
+});
+$("btnInboundPoll").addEventListener("click", async () => {
+  $("btnInboundPoll").disabled = true;
+  await runCmd({ cmd: "inboundPollNow" });
+  await loadInbound();
+});
+$("btnTokenCreate").addEventListener("click", async () => {
+  const label = $("tokenLabel").value.trim() || "Webhook";
+  const resp = await runCmd({ cmd: "inboundTokenCreate", label });
+  if (!resp || !resp.ok) return;
+  $("tokenLabel").value = "";
+  // Shown once: only a hash is kept on the server.
+  const box = $("tokenNew");
+  box.classList.remove("hidden");
+  box.innerHTML = `<b>Copy this token now — it won't be shown again.</b><code></code><button class="ghost small">Copy</button>`;
+  box.querySelector("code").textContent = resp.token.token;
+  box.querySelector("button").addEventListener("click", () => navigator.clipboard.writeText(resp.token.token).catch(() => {}));
+  loadTokens();
+});
+// Tokens live on the server; only fetch them when someone opens the panel.
+$("inboundPanel").addEventListener("toggle", () => {
+  if ($("inboundPanel").open) { loadInbound(); loadTokens(); }
+});
+
+// ------------------------------------------------------------- activity log
+
+let activityLog = [];
+
+const LOG_KIND = {
+  friendScan: "Scan friends",
+  friendDatesScan: "Scan friend dates",
+  engagementScan: "Scan engagement",
+  removal: "Remove friends",
+  manualRemoval: "Marked removed",
+  webhook: "Webhook request",
+};
+
+function renderLog() {
+  const filter = $("logFilter").value;
+  const rows = activityLog.filter((e) => {
+    if (filter === "problems") return e.status === "error" || e.status === "cancelled" || (e.warnings && e.warnings.length) ||
+      (e.detail && e.detail.failed && e.detail.failed.length);
+    if (filter === "all") return true;
+    return e.trigger === filter;
+  });
+  $("logCount").textContent = activityLog.length ? `(${activityLog.length})` : "";
+  $("logEmpty").classList.toggle("hidden", rows.length > 0);
+  const tbody = $("logRows");
+  tbody.textContent = "";
+  for (const e of rows) {
+    const tr = document.createElement("tr");
+    tr.className = "st-" + e.status;
+    const when = document.createElement("td");
+    when.textContent = fmtWhen(e.startedAt);
+    if (e.finishedAt && e.finishedAt - e.startedAt > 1000) {
+      when.title = "Took " + Math.round((e.finishedAt - e.startedAt) / 60000 * 10) / 10 + " min";
+    }
+    const what = document.createElement("td");
+    what.textContent = LOG_KIND[e.kind] || e.kind;
+    const by = document.createElement("td");
+    by.textContent = e.trigger === "webhook" ? "Webhook" + (e.source ? ` (${e.source})` : "")
+      : e.trigger === "schedule" ? "Schedule" : "You";
+    const result = document.createElement("td");
+    const status = { running: "Running", done: "Done", error: "Failed", cancelled: "Cancelled" }[e.status] || e.status;
+    result.innerHTML = `<span class="logstatus"></span> <span class="logsummary"></span>`;
+    result.querySelector(".logstatus").textContent = status;
+    result.querySelector(".logsummary").textContent = [e.summary, e.error].filter(Boolean).join(" — ");
+    const notes = [...(e.warnings || [])];
+    if (e.detail && e.detail.failed && e.detail.failed.length) {
+      notes.push("Couldn't remove: " + e.detail.failed.map((f) => `${f.name} (${f.error})`).join(", "));
+    }
+    if (e.detail && e.detail.removed && e.detail.removed.length) {
+      notes.push("Removed: " + e.detail.removed.join(", "));
+    }
+    if (notes.length) {
+      const d = document.createElement("div");
+      d.className = "lognotes";
+      d.textContent = notes.join(" · ");
+      result.appendChild(d);
+    }
+    tr.append(when, what, by, result);
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadLog() {
+  const resp = await chrome.runtime.sendMessage({ cmd: "getActivityLog" }).catch(() => null);
+  activityLog = (resp && resp.log) || [];
+  renderLog();
+}
+
+$("logFilter").addEventListener("change", renderLog);
+$("btnLogClear").addEventListener("click", async () => {
+  if (!confirm("Clear the activity log in this browser?")) return;
+  await chrome.runtime.sendMessage({ cmd: "clearActivityLog" });
 });
 
 // Live-refresh when scans — or another browser, via sync — write new data.
@@ -1005,6 +1339,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
     schedule = changes.schedule.newValue || null;
     renderSchedule();
   }
+  if (changes.activityLog) {
+    activityLog = changes.activityLog.newValue || [];
+    renderLog();
+  }
+  if (inbound && (changes.inboundStatus || changes.inboundSettings)) {
+    if (changes.inboundStatus) inbound.status = changes.inboundStatus.newValue || null;
+    if (changes.inboundSettings) inbound.settings = changes.inboundSettings.newValue || inbound.settings;
+    renderInbound();
+  }
   if (changes.friends || changes.engagement || changes.job || changes.settings) render();
 });
 
@@ -1014,3 +1357,5 @@ setInterval(() => {
 }, 1000);
 
 loadAccount().then(load);
+loadLog();
+loadInbound();

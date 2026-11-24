@@ -290,7 +290,7 @@
     const friends = extractFriends(selfUrl);
     await send({ cmd: "friendScanResult", friends, phase, done: true });
     if (phase === "recent") {
-      showHud(`done — friend order captured for ${friends.length} friends. You can close this tab.`);
+      showHud(`friend order captured for ${friends.length} friends — now capturing friend dates…`);
     } else {
       showHud(`${friends.length} friends captured — now capturing friend order…`);
     }
@@ -1078,7 +1078,10 @@
     if (!resp || !resp.job) return;
     const { job } = resp;
     try {
-      if (job.type === "friendScan") {
+      if (job.type === "friendScan" && job.phase === "dates") {
+        // Step 3 of Scan friends, on the Activity Log page.
+        await runFriendDatesScan();
+      } else if (job.type === "friendScan") {
         await runFriendScan(resp.selfUrl, job.phase || "all");
       } else if (job.type === "friendDatesScan") {
         await runFriendDatesScan();

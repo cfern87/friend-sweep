@@ -287,3 +287,80 @@ footer summary { cursor: pointer; font-weight: 600; color: #444; }
 .lockcard p { color: #65676b; margin: 0 0 18px; }
 .lockcard .note { margin: 14px 0 0; font-size: 12px; }
 .lockcard button { width: 100%; padding: 12px; }
+
+/* ---- job banner: cancel + progress live with the job */
+.jobbar .jobbody { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.jobbar .jobactions { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.jobbar .jobactions button.jobclose { margin-left: 0; }
+.jobprogress {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  max-width: 520px;
+}
+.jobprogress .ok { background: #127a5a; transition: width 0.4s; }
+.jobprogress .bad { background: #dc3545; transition: width 0.4s; }
+button.small { padding: 5px 10px; font-size: 12px; }
+button.jobcancel { border-color: #b8d9ff; background: #fff; }
+
+/* ---- failed removals */
+tbody tr.failed { background: #fff7f7; }
+tbody tr.failed:hover { background: #ffefef; }
+.badge.failed { background: #dc3545; color: #fff; cursor: help; }
+.failcell { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.failaction { font-size: 12px; }
+a.failaction { color: #0866ff; font-weight: 600; text-decoration: none; white-space: nowrap; }
+a.failaction:hover { text-decoration: underline; }
+button.failaction { padding: 3px 8px; }
+.stats a.statfailed { color: #c0392b; text-decoration: none; }
+.stats a.statfailed b { color: #c0392b; }
+.stats a.statfailed:hover { text-decoration: underline; }
+.fltfailed { color: #c0392b; font-weight: 600; }
+.count { color: #65676b; font-weight: 400; }
+
+.account a.acctemail { color: #65676b; font-weight: 500; }
+
+/* ---- incoming webhooks + activity log: wider panels than the settings column */
+#inboundPanel .settings, #logPanel .settings { max-width: 760px; }
+.betatag {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  margin-left: 4px; padding: 1px 6px; border-radius: 999px;
+  background: #e7f3ff; color: #0b5cad; vertical-align: middle;
+}
+.endpoint { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.endpoint code, .tokenlist code, .tokennew code {
+  font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: #fff; border: 1px solid #e4e6eb; border-radius: 4px; padding: 2px 6px;
+}
+.settings .tokens input[type="text"] { width: 180px; }
+.tokenlist { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tokenlist li { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.tokennew {
+  margin-top: 8px; padding: 10px; border-radius: 6px; background: #e9f9ee; border: 1px solid #b7ecc8;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px;
+}
+.tokennew.hidden { display: none; }
+.tokennew code { word-break: break-all; }
+button.danger-text { color: #dc3545; border-color: #f1b0b7; }
+details.example summary { font-weight: 500; font-size: 13px; }
+details.example pre {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: #1c2b33; color: #e4e6eb; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre;
+}
+#inboundCommands label { justify-content: flex-start; }
+
+table.log { font-size: 13px; background: #fff; border-radius: 6px; overflow: hidden; }
+table.log th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em;
+  color: #65676b; padding: 6px 10px; border-bottom: 1px solid #e4e6eb;
+}
+table.log td { padding: 6px 10px; vertical-align: top; }
+table.log td:first-child { white-space: nowrap; color: #65676b; }
+.logstatus { font-weight: 700; }
+tr.st-done .logstatus { color: #1a7f3c; }
+tr.st-error .logstatus { color: #c0392b; }
+tr.st-cancelled .logstatus { color: #8a6d00; }
+tr.st-running .logstatus { color: #0b5cad; }
+.lognotes { font-size: 12px; color: #65676b; margin-top: 2px; }

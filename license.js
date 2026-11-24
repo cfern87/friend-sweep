@@ -340,6 +340,13 @@ const NAFS = (() => {
     openWebSignIn,
     signOut,
     ensureAlarm,
+    // For inbound.js: the incoming-webhook tables live in the same auth
+    // project, read as the signed-in user.
+    AUTH_URL,
+    AUTH_KEY,
+    accessToken,
+    apiBase,
+    accountUrl: () => PLATFORM_URL + "/account",
     billingUrl: () => PLATFORM_URL + "/account/billing",
     supportUrl: () => PLATFORM_URL + "/support",
   };

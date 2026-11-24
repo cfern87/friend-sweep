@@ -5,7 +5,7 @@
 // sync.js mirrors that data into chrome.storage.sync across browsers, and into
 // Google Drive (drive.js) on browsers that connected it.
 
-importScripts("drive.js", "sync.js", "license.js");
+importScripts("drive.js", "sync.js", "license.js", "inbound.js");
 
 const FB = "https://www.facebook.com";
 
@@ -14,7 +14,15 @@ const FB = "https://www.facebook.com";
 const ALARM_REMOVAL = "removal-step";
 const ALARM_CLEANUP = "job-cleanup";
 const ALARM_CHAIN = "job-chain";
-const ALARM_AUTO = "auto-scan";
+// One-minute heartbeat, as in Not Another Social CRM: each tick runs the
+// schedule if it's due and polls the incoming-webhook inbox if it's on.
+// Checking "is it due?" every minute (rather than one long repeating alarm)
+// survives extension reloads and lets a run that was blocked by a busy tab go
+// as soon as the tab is free.
+const ALARM_TICK = "tick";
+const TICK_MINUTES = 1;
+// Earlier versions armed one repeating alarm per schedule; cleared on wake.
+const LEGACY_ALARM_AUTO = "auto-scan";
 
 // Texts that earlier versions could mistakenly capture as a person's name
 // (the "N mutual friends" link on friend cards, action buttons, counts).
@@ -85,15 +93,137 @@ async function clearJob() {
   await chrome.alarms.clear(ALARM_CHAIN);
 }
 
+// ---------------------------------------------------------------- activity log
+//
+// Every job — whoever started it (you, the schedule, a webhook) — gets one
+// entry, written when it starts and updated when it ends. Webhook requests
+// that were refused before any job started are logged too, so "why didn't my
+// Zap do anything?" has an answer on the dashboard. Local to this browser,
+// like the CRM's run records: what ran here is a fact about this machine.
+
+const LOG_KEY = "activityLog";
+const LOG_MAX = 200;
+
+let logLock = Promise.resolve();
+function logPut(entry) {
+  const run = logLock.then(async () => {
+    const { [LOG_KEY]: log = [] } = await getStore(LOG_KEY);
+    const i = log.findIndex((e) => e.id === entry.id);
+    if (i >= 0) log[i] = { ...log[i], ...entry };
+    else log.unshift(entry);
+    await setStore({ [LOG_KEY]: log.slice(0, LOG_MAX) });
+  });
+  logLock = run.catch(() => {});
+  return run;
+}
+
+function newId() {
+  return crypto.randomUUID();
+}
+
+const JOB_LABELS = {
+  friendScan: "Scan friends",
+  engagementScan: "Scan engagement",
+  removal: "Remove friends",
+};
+
+// One line describing what a job did, for the log and webhook results.
+function describeJob(job) {
+  const p = job.progress || {};
+  if (job.type === "friendScan") {
+    return `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} with friend dates` : "");
+  }
+  if (job.type === "engagementScan") {
+    return `${p.posts || 0} posts checked, ${p.events || 0} new reactions/comments` +
+      (job.days ? ` (${job.days}-day window)` : "");
+  }
+  if (job.type === "removal") {
+    return `${p.done || 0} of ${p.total || 0} removed` + (p.failed ? `, ${p.failed} failed` : "");
+  }
+  return "";
+}
+
+// Record a job's start. Every start* function goes through here.
+async function beginJob(job, opts = {}) {
+  job.logId = newId();
+  job.trigger = opts.inbound ? "webhook" : opts.auto ? "schedule" : "manual";
+  if (opts.chain && opts.chain.length) job.chain = opts.chain;
+  if (opts.auto) job.auto = true;
+  if (opts.inbound) job.inbound = opts.inbound;
+  await setJob(job);
+  await logPut({
+    id: job.logId,
+    kind: job.type,
+    trigger: job.trigger,
+    source: opts.inbound ? opts.inbound.label : null,
+    startedAt: job.startedAt,
+    status: "running",
+    summary: describeJob(job),
+  });
+}
+
+// Record a job's end, and answer the webhook that started it once its last
+// step is over. status: "done" | "error" | "cancelled".
+async function endJob(job, status, error) {
+  if (job.logId) {
+    const entry = {
+      id: job.logId,
+      status,
+      finishedAt: Date.now(),
+      summary: describeJob(job),
+      error: error || null,
+      warnings: Array.isArray(job.warnings) && job.warnings.length ? job.warnings : null,
+    };
+    if (job.type === "removal") entry.detail = await removalDetail(job);
+    await logPut(entry);
+  }
+  if (!job.inbound) return;
+  const step = { scan: job.type, status, summary: describeJob(job), progress: job.progress || {} };
+  if (error) step.error = error;
+  if (job.warnings && job.warnings.length) step.warnings = job.warnings;
+  job.inbound.steps = (job.inbound.steps || []).concat(step);
+  const more = status === "done" && Array.isArray(job.chain) && job.chain.length;
+  if (more) return; // the next step carries the request on (see runChainStep)
+  await FriendInbound.complete(job.inbound.id, {
+    status: status === "done" ? "done" : "failed",
+    result: { command: job.inbound.command, steps: job.inbound.steps },
+    ...(status === "done" ? {} : { error: error || (status === "cancelled" ? "Cancelled from the dashboard." : "Failed.") }),
+  });
+  job.inbound = null;
+}
+
+// Names, not just counts, for a removal's log entry.
+async function removalDetail(job) {
+  const { friends = {} } = await getStore("friends");
+  const name = (k) => (friends[k] && friends[k].name) || k;
+  return {
+    removed: (job.done || []).map(name),
+    failed: (job.failed || []).map((f) => ({ name: name(f.key), error: f.error })),
+  };
+}
+
+// A running job stopped before it finished: the tab closed, the content
+// script hit an error, or the user pressed Cancel.
+async function failJob(job, error) {
+  job.status = "error";
+  job.error = error;
+  await setJob(job);
+  await chrome.alarms.clear(ALARM_REMOVAL);
+  await chrome.alarms.clear(ALARM_CHAIN);
+  await endJob(job, "error", error);
+  await setJob(job);
+}
+
 // Mark a job complete. A finished job lingers just long enough for the
 // dashboard to show its result, then ALARM_CLEANUP removes it — the user never
-// has to press "Cancel job" to get rid of a banner for work that already ended.
+// has to dismiss a banner for work that already ended.
 // Jobs carrying a `chain` (scheduled multi-scan runs) start their next step
 // instead of clearing.
 async function finishJob(job) {
   job.status = "finished";
   job.finishedAt = Date.now();
   job.current = null;
+  await endJob(job, "done");
   await setJob(job);
   await chrome.alarms.clear(ALARM_REMOVAL);
   if (Array.isArray(job.chain) && job.chain.length) {
@@ -122,25 +252,42 @@ async function runChainStep() {
   if (!job || !Array.isArray(job.chain) || !job.chain.length) return;
   const chain = job.chain.slice();
   const type = chain.shift();
-  const opts = { chain, auto: job.auto, days: job.days, tabId: job.tabId };
+  const opts = {
+    chain,
+    auto: job.auto,
+    days: job.chainDays || job.days,
+    tabId: job.tabId,
+    inbound: job.inbound || null,
+  };
   await clearJob();
   await startScanByType(type, opts);
 }
 
-// Fields every start* function copies onto its job so chained/scheduled runs
-// keep their identity across steps.
-function jobMeta(opts = {}) {
-  const meta = {};
-  if (opts.chain && opts.chain.length) meta.chain = opts.chain;
-  if (opts.auto) meta.auto = true;
-  return meta;
-}
-
 function startScanByType(type, opts) {
-  if (type === "friendScan") return startFriendScan(opts);
-  if (type === "friendDatesScan") return startFriendDatesScan(opts);
+  // "friendDatesScan" was its own step before it became part of Scan friends;
+  // old schedules and synced settings may still name it.
+  if (type === "friendScan" || type === "friendDatesScan") return startFriendScan(opts);
   if (type === "engagementScan") return startEngagementScan(opts);
   return Promise.resolve();
+}
+
+// Start the scans a webhook asked for (inbound.js). Never while another job is
+// running — the poller already checks, this is the backstop.
+async function startScansForWebhook(command, { days, inbound }) {
+  const job = await getJob();
+  if (job && job.status === "running") return { ok: false, error: "Another job is running." };
+  await clearJob();
+  const chain = {
+    "scan.friends": ["friendScan"],
+    "scan.engagement": ["engagementScan"],
+    "scan.all": ["friendScan", "engagementScan"],
+  }[command];
+  if (!chain) return { ok: false, error: "Unknown scan." };
+  const { settings = {} } = await getStore("settings");
+  const first = chain.shift();
+  const d = days || settings.scanDays || 30;
+  await startScanByType(first, { chain, inbound, days: d, chainDays: d });
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------- tabs
@@ -173,49 +320,46 @@ function sendToTab(tabId, msg) {
 
 // ---------------------------------------------------------------- jobs
 
-async function startFriendScan(opts) {
-  const tabId = await openJobTab(FB + "/me/friends", opts && opts.tabId);
-  await setJob({
+// "Scan friends" is one operation in three phases, each on its own page:
+//   "all"    — the full friends list (/me/friends)
+//   "recent" — the Recently-added tab, for friend order
+//   "dates"  — the Activity Log's Friends category, for the date you became
+//              friends. Best effort: if Facebook won't show it, the list and
+//              order are still saved and the job ends with a note.
+async function startFriendScan(opts = {}) {
+  const tabId = await openJobTab(FB + "/me/friends", opts.tabId);
+  await beginJob({
     type: "friendScan",
     status: "running",
-    phase: "all", // "all" = full list, then "recent" = recently-added order
+    phase: "all",
     tabId,
     startedAt: Date.now(),
-    progress: { found: 0 },
-    ...jobMeta(opts),
-  });
+    progress: { found: 0, dated: 0 },
+    // The engagement window for a later step in the chain (this scan has none).
+    ...(opts.chainDays || opts.days ? { chainDays: opts.chainDays || opts.days } : {}),
+  }, opts);
 }
 
-async function startFriendDatesScan(opts) {
-  // The activity log lives under the user's own profile path. Prefer the
-  // concrete profile URL captured during earlier scans; /me works too.
+// The activity log lives under the user's own profile path. Prefer the
+// concrete profile URL captured during earlier scans; /me works too.
+async function friendDatesUrl() {
   const { selfUrl } = await getStore("selfUrl");
   let base = FB + "/me";
   if (selfUrl) {
     const m = selfUrl.match(/profile\.php\?id=(\d+)/);
     base = m ? FB + "/" + m[1] : selfUrl;
   }
-  const url =
-    base +
+  return base +
     "/allactivity/?category_key=FRIENDS&filter_hidden=ALL&filter_privacy=NONE&manage_mode=false";
-  const tabId = await openJobTab(url, opts && opts.tabId);
-  await setJob({
-    type: "friendDatesScan",
-    status: "running",
-    tabId,
-    startedAt: Date.now(),
-    progress: { dated: 0 },
-    ...jobMeta(opts),
-  });
 }
 
-async function startEngagementScan(opts) {
+async function startEngagementScan(opts = {}) {
   // The look-back window is a plan feature: clamp it to what the plan allows
-  // (scheduled runs get here too, not just the dashboard button).
+  // (scheduled and webhook runs get here too, not just the dashboard button).
   const ent = await NAFS.getEntitlement();
-  const days = Math.min((opts && opts.days) || 30, ent.maxScanDays || NAFS.FREE_MAX_SCAN_DAYS);
-  const tabId = await openJobTab(FB + "/me", opts && opts.tabId);
-  await setJob({
+  const days = Math.min(opts.days || 30, ent.maxScanDays || NAFS.FREE_MAX_SCAN_DAYS);
+  const tabId = await openJobTab(FB + "/me", opts.tabId);
+  await beginJob({
     type: "engagementScan",
     status: "running",
     tabId,
@@ -223,8 +367,7 @@ async function startEngagementScan(opts) {
     days,
     maxPosts: 400, // hard safety cap regardless of window
     progress: { posts: 0, events: 0 },
-    ...jobMeta(opts),
-  });
+  }, opts);
 }
 
 async function startRemoval(friendKeys) {
@@ -251,7 +394,7 @@ async function startRemoval(friendKeys) {
   // Same defaults and ~30s floor the dashboard shows and the legacy flow uses.
   const minSec = Math.max(30, settings.removeDelayMinSec || 30);
   const maxSec = Math.max(minSec, settings.removeDelayMaxSec || 60);
-  await setJob({
+  await beginJob({
     type: "removal",
     mode: "batch",
     status: "running",
@@ -268,6 +411,22 @@ async function startRemoval(friendKeys) {
       : {}),
   });
   return { ok: true, trimmed };
+}
+
+// Remember how each removal went on the friend record itself, so the list can
+// show who is still a friend after a failed attempt. Call inside the store lock.
+function recordRemovalOutcome(friends, key, ok, error) {
+  const f = friends[key];
+  if (!f) return false;
+  if (ok) {
+    f.removedAt = Date.now();
+    delete f.removeFailedAt;
+    delete f.removeError;
+  } else {
+    f.removeFailedAt = Date.now();
+    f.removeError = String(error || "unknown").slice(0, 200);
+  }
+  return true;
 }
 
 async function removalNext() {
@@ -309,10 +468,7 @@ async function handleRemovalResult(msg) {
         friends[msg.friendKey].profileId = String(msg.profileId);
         friendsChanged = true;
       }
-      if (msg.ok && friends[msg.friendKey]) {
-        friends[msg.friendKey].removedAt = Date.now();
-        friendsChanged = true;
-      }
+      if (recordRemovalOutcome(friends, msg.friendKey, msg.ok, msg.error)) friendsChanged = true;
       if (friendsChanged) await setStore({ friends });
     });
     if (msg.ok) {
@@ -332,17 +488,14 @@ async function handleRemovalResult(msg) {
   if (job.current !== msg.friendKey) return;
 
   const { settings = {} } = await getStore("settings");
+  await withStoreLock(async () => {
+    const { friends = {} } = await getStore("friends");
+    if (recordRemovalOutcome(friends, msg.friendKey, msg.ok, msg.error)) await setStore({ friends });
+  });
   if (msg.ok) {
     job.done.push(msg.friendKey);
     job.progress.done++;
     NAFS.recordRemoval();
-    await withStoreLock(async () => {
-      const { friends = {} } = await getStore("friends");
-      if (friends[msg.friendKey]) {
-        friends[msg.friendKey].removedAt = Date.now();
-        await setStore({ friends });
-      }
-    });
   } else {
     job.failed.push({ key: msg.friendKey, error: msg.error || "unknown" });
     job.progress.failed++;
@@ -368,20 +521,35 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_REMOVAL) removalNext();
   else if (alarm.name === ALARM_CLEANUP) cleanupFinishedJob();
   else if (alarm.name === ALARM_CHAIN) runChainStep();
-  else if (alarm.name === ALARM_AUTO) runScheduledScan();
+  else if (alarm.name === ALARM_TICK) onTick();
+  else if (alarm.name === LEGACY_ALARM_AUTO) chrome.alarms.clear(LEGACY_ALARM_AUTO);
   else if (alarm.name === NAFS.ALARM) NAFS.refreshEntitlement().catch(() => {});
 });
+
+let ticking = null;
+function onTick() {
+  if (!ticking) {
+    ticking = (async () => {
+      await runDueSchedule().catch((e) => console.warn("[NAFS] schedule tick:", e));
+      await FriendInbound.poll();
+    })().finally(() => (ticking = null));
+  }
+  return ticking;
+}
+
+function ensureTickAlarm() {
+  chrome.alarms.clear(LEGACY_ALARM_AUTO);
+  chrome.alarms.get(ALARM_TICK, (existing) => {
+    if (!existing) chrome.alarms.create(ALARM_TICK, { delayInMinutes: TICK_MINUTES, periodInMinutes: TICK_MINUTES });
+  });
+}
 
 // A running job whose tab is gone can never report back, so it would otherwise
 // sit "running" forever and keep the dashboard's actions disabled.
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const job = await getJob();
   if (!job || job.status !== "running" || job.tabId !== tabId) return;
-  job.status = "error";
-  job.error = "the Facebook tab was closed before the job finished";
-  await setJob(job);
-  await chrome.alarms.clear(ALARM_REMOVAL);
-  await chrome.alarms.clear(ALARM_CHAIN);
+  await failJob(job, "the Facebook tab was closed before the job finished");
 });
 
 // ---------------------------------------------------------------- results
@@ -414,13 +582,18 @@ async function handleFriendScanResult(msg) {
   const job = await getJob();
   if (!job || job.type !== "friendScan") return;
   job.progress.found = Object.keys(friends).length;
+  // A stray "done" from a page the job has already moved past changes nothing.
+  if (msg.done && msg.phase && msg.phase !== job.phase) return;
   if (msg.done) {
-    if (job.phase === "all") {
-      // Phase 2: walk the "Recently added" tab to capture friend order.
-      job.phase = "recent";
+    const next = job.phase === "all" ? "recent" : job.phase === "recent" ? "dates" : null;
+    if (next) {
+      // Phase 2 walks "Recently added" for friend order; phase 3 the Activity
+      // Log for friend dates.
+      job.phase = next;
       await setJob(job);
       try {
-        await chrome.tabs.update(job.tabId, { url: FB + "/me/friends_recent" });
+        const url = next === "recent" ? FB + "/me/friends_recent" : await friendDatesUrl();
+        await chrome.tabs.update(job.tabId, { url });
       } catch (e) {
         await finishJob(job);
       }
@@ -430,6 +603,16 @@ async function handleFriendScanResult(msg) {
     return;
   }
   await setJob(job);
+}
+
+// The dates phase is a bonus on top of the friend list. If Facebook won't show
+// the Activity Log, keep what the first two phases found and say so.
+async function endFriendDatesEarly(job, error) {
+  const note = `Friend dates couldn't be read from your Activity Log (${String(error).slice(0, 120)}). ` +
+    "Your friend list and friend order were still saved.";
+  const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+  if (!warnings.includes(note)) job.warnings = warnings.concat(note);
+  await finishJob(job);
 }
 
 async function handleFriendDatesResult(msg) {
@@ -471,7 +654,8 @@ async function handleFriendDatesResult(msg) {
   });
 
   const job = await getJob();
-  if (job && job.type === "friendDatesScan") {
+  if (job && job.status === "running" &&
+      (job.type === "friendDatesScan" || (job.type === "friendScan" && job.phase === "dates"))) {
     job.progress.dated = Object.values(friends).filter((f) => f.friendedAt).length;
     if (msg.done) await finishJob(job);
     else await setJob(job);
@@ -629,6 +813,11 @@ async function noteBrokenDocId(msg, sender) {
 // Unattended re-scans: every `everyHours`, run `scans` in order, with
 // `days` as the engagement look-back window. Removals are never automated —
 // only the read-only scans, so nothing destructive happens unsupervised.
+//
+// Same model as Not Another Social CRM's automations: nothing is armed per
+// schedule. The one-minute tick asks "is it due?" (lastRunAt + period, with a
+// minute of slack), so a reload can't lose the timer and a run that found the
+// tab busy simply goes on the next free tick.
 const DEFAULT_SCHEDULE = {
   enabled: false,
   everyHours: 24,
@@ -639,43 +828,52 @@ const DEFAULT_SCHEDULE = {
   configAt: 0, // when the user last changed the schedule — orders synced edits
 };
 
-const SCAN_TYPES = ["friendScan", "friendDatesScan", "engagementScan"];
+const SCAN_TYPES = ["friendScan", "engagementScan"];
+const DUE_SLACK_MS = 60000;
+
+// Friend dates used to be a scan of their own; they're part of friendScan now.
+function normalizeScans(scans) {
+  const list = Array.isArray(scans) ? scans : [];
+  const mapped = list.map((s) => (s === "friendDatesScan" ? "friendScan" : s));
+  return SCAN_TYPES.filter((t) => mapped.includes(t));
+}
 
 async function getSchedule() {
   const { schedule } = await getStore("schedule");
-  return { ...DEFAULT_SCHEDULE, ...(schedule || {}) };
+  const s = { ...DEFAULT_SCHEDULE, ...(schedule || {}) };
+  s.scans = normalizeScans(s.scans);
+  return s;
 }
 
-// Persist a schedule change and (re)arm the repeating alarm to match.
+// Persist a schedule change and work out when it next runs.
 async function applySchedule(patch) {
-  const sched = { ...(await getSchedule()), ...(patch || {}) };
+  const prev = await getSchedule();
+  const sched = { ...prev, ...(patch || {}) };
   sched.everyHours = Math.max(1, Number(sched.everyHours) || 24);
   sched.days = Math.max(1, Number(sched.days) || 30);
-  sched.scans = (sched.scans || []).filter((s) => SCAN_TYPES.includes(s));
+  sched.scans = normalizeScans(sched.scans);
   sched.enabled = !!sched.enabled && sched.scans.length > 0;
 
-  await chrome.alarms.clear(ALARM_AUTO);
-  if (sched.enabled) {
-    const periodInMinutes = sched.everyHours * 60;
-    sched.nextRunAt = Date.now() + periodInMinutes * 60000;
-    chrome.alarms.create(ALARM_AUTO, { delayInMinutes: periodInMinutes, periodInMinutes });
-  } else {
-    sched.nextRunAt = 0;
-  }
+  const period = sched.everyHours * 3600000;
+  if (!sched.enabled) sched.nextRunAt = 0;
+  else if (sched.lastRunAt) sched.nextRunAt = sched.lastRunAt + period;
+  // Never run yet: the first run is one period after switching on.
+  else if (prev.enabled && prev.nextRunAt) sched.nextRunAt = Math.min(prev.nextRunAt, Date.now() + period);
+  else sched.nextRunAt = Date.now() + period;
+
   await setStore({ schedule: sched });
   return sched;
 }
 
-// Alarms are cleared when the extension reloads/updates, so re-arm on wake.
-async function ensureScheduleAlarm() {
+async function runDueSchedule() {
   const sched = await getSchedule();
-  if (!sched.enabled) return;
-  const existing = await chrome.alarms.get(ALARM_AUTO);
-  if (!existing) await applySchedule({});
+  if (!sched.enabled || !sched.nextRunAt) return;
+  if (Date.now() < sched.nextRunAt - DUE_SLACK_MS) return;
+  await runScheduledScan(false);
 }
 
-chrome.runtime.onInstalled.addListener(ensureScheduleAlarm);
-chrome.runtime.onStartup.addListener(ensureScheduleAlarm);
+chrome.runtime.onInstalled.addListener(ensureTickAlarm);
+chrome.runtime.onStartup.addListener(ensureTickAlarm);
 chrome.runtime.onInstalled.addListener(NAFS.ensureAlarm);
 chrome.runtime.onStartup.addListener(NAFS.ensureAlarm);
 
@@ -687,9 +885,45 @@ FriendSync.init({
     const job = await getJob();
     return !!(job && job.status === "running");
   },
-  // Another browser deleted everything: stop this one's scheduled scans too.
-  afterWipe: () => chrome.alarms.clear(ALARM_AUTO),
+  // Another browser deleted everything; the wiped schedule reads as "off", so
+  // the tick has nothing left to run. Nothing to clear here any more.
+  // The activity log names people, so it goes with the rest of the data.
+  afterWipe: () => chrome.storage.local.remove(LOG_KEY),
 });
+
+FriendInbound.init({
+  isBusy: async () => {
+    const job = await getJob();
+    return !!(job && job.status === "running");
+  },
+  deviceId,
+  startScans: startScansForWebhook,
+  logRequest: ({ command, label, status, error }) =>
+    logPut({
+      id: newId(),
+      kind: "webhook",
+      trigger: "webhook",
+      source: label,
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      status,
+      summary: `Request "${command}"` + (status === "done" ? " answered" : " refused"),
+      error: error || null,
+    }),
+});
+
+// A random id for this browser, so a webhook result says which one ran it.
+async function deviceId() {
+  const { deviceId: id } = await getStore("deviceId");
+  if (id) return id;
+  const next = "browser-" + newId().slice(0, 8);
+  await setStore({ deviceId: next });
+  return next;
+}
+
+// Make sure the tick is running whenever the worker wakes, not only on
+// install/startup events (a worker revived by a message counts too).
+ensureTickAlarm();
 
 // `force` is the dashboard's "Run now": it runs the configured sequence even
 // when the repeating schedule is switched off, and leaves the timer alone.
@@ -711,7 +945,7 @@ async function runScheduledScan(force) {
   const period = sched.everyHours * 3600000;
   if (!force && sched.lastRunAt && Date.now() - sched.lastRunAt < period * 0.9) {
     if (sched.enabled) {
-      sched.nextRunAt = Date.now() + period;
+      sched.nextRunAt = sched.lastRunAt + period;
       await setStore({ schedule: sched });
     }
     return;
@@ -719,22 +953,19 @@ async function runScheduledScan(force) {
 
   const job = await getJob();
   if (job && job.status === "running") {
-    // Something is already driving a Facebook tab — a manual scan, or the
-    // previous scheduled run still going. Skip this tick rather than fight it.
-    if (sched.enabled) {
-      sched.nextRunAt = Date.now() + sched.everyHours * 3600000;
-      await setStore({ schedule: sched });
-    }
+    // Something is already driving a Facebook tab — a manual scan, a webhook,
+    // or the previous scheduled run still going. Don't fight it: the run stays
+    // due and the next tick after the job ends starts it.
     return;
   }
   await clearJob();
 
-  const chain = sched.scans.filter((s) => SCAN_TYPES.includes(s));
+  const chain = sched.scans.slice();
   const first = chain.shift();
   sched.lastRunAt = Date.now();
-  if (sched.enabled) sched.nextRunAt = Date.now() + sched.everyHours * 3600000;
+  if (sched.enabled) sched.nextRunAt = Date.now() + period;
   await setStore({ schedule: sched });
-  await startScanByType(first, { chain, auto: true, days: sched.days });
+  await startScanByType(first, { chain, auto: true, days: sched.days, chainDays: sched.days });
 }
 
 // ---------------------------------------------------------------- messages
@@ -743,11 +974,18 @@ async function runScheduledScan(force) {
 // feature (if any) each one needs on top of that.
 const GATED_CMDS = {
   startFriendScan: null,
-  startFriendDatesScan: null,
   startEngagementScan: "maxScanDays",
   startRemoval: null,
+  markRemoved: null,
   setSchedule: "scheduledScans",
   runScheduleNow: "scheduledScans",
+  // Webhooks are an automation feature, like the schedule.
+  inboundSetSettings: "scheduledScans",
+  inboundTokenCreate: "scheduledScans",
+  inboundTokens: null,
+  inboundTokenRevoke: null,
+  inboundRecent: null,
+  inboundPollNow: "scheduledScans",
 };
 
 async function gate(msg, sender) {
@@ -762,7 +1000,14 @@ async function gate(msg, sender) {
   if (need === "scheduledScans" && !ent.scheduledScans) {
     // Switching the schedule off is always allowed.
     if (msg.cmd === "setSchedule" && !(msg.schedule && msg.schedule.enabled)) return null;
-    return { ok: false, upgrade: true, error: "Scheduled scans are a Pro feature." };
+    if (msg.cmd === "inboundSetSettings" && !(msg.patch && msg.patch.enabled)) return null;
+    return {
+      ok: false,
+      upgrade: true,
+      error: msg.cmd.startsWith("inbound")
+        ? "Incoming webhooks are a Pro feature."
+        : "Scheduled scans are a Pro feature.",
+    };
   }
   if (need === "maxScanDays" && (msg.days || 30) > ent.maxScanDays) {
     return {
@@ -802,6 +1047,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         chrome.tabs.create({ url: NAFS.supportUrl() });
         sendResponse({ ok: true });
         break;
+      case "openAccount":
+        chrome.tabs.create({ url: NAFS.accountUrl() });
+        sendResponse({ ok: true });
+        break;
 
       // ---- from the dashboard / popup
       case "startFriendScan":
@@ -809,11 +1058,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       case "startEngagementScan":
-        await startEngagementScan(msg);
-        sendResponse({ ok: true });
-        break;
-      case "startFriendDatesScan":
-        await startFriendDatesScan();
+        await startEngagementScan({ days: msg.days });
         sendResponse({ ok: true });
         break;
       case "startRemoval":
@@ -822,10 +1067,95 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "cancelJob": {
         const job = await getJob();
         if (job && job.tabId != null) sendToTab(job.tabId, { cmd: "abort" });
+        if (job && job.status === "running") {
+          job.status = "cancelled";
+          await endJob(job, "cancelled", "Cancelled");
+        }
         await clearJob();
         sendResponse({ ok: true });
         break;
       }
+      case "markRemoved": {
+        // The person was unfriended by hand on Facebook after the extension
+        // couldn't do it. Not counted against the free allowance: the extension
+        // didn't remove them.
+        const names = [];
+        await withStoreLock(async () => {
+          const { friends = {} } = await getStore("friends");
+          const now = Date.now();
+          for (const k of msg.keys || []) {
+            const f = friends[k];
+            if (!f || f.removedAt) continue;
+            f.removedAt = now;
+            f.removedManually = true;
+            delete f.removeFailedAt;
+            delete f.removeError;
+            names.push(f.name || k);
+          }
+          await setStore({ friends });
+        });
+        if (names.length) {
+          await logPut({
+            id: newId(), kind: "manualRemoval", trigger: "manual",
+            startedAt: Date.now(), finishedAt: Date.now(), status: "done",
+            summary: `Marked ${names.length} as removed by hand`, detail: { removed: names },
+          });
+        }
+        sendResponse({ ok: true, marked: names.length });
+        break;
+      }
+      case "clearRemoveFailed": {
+        // "Keep them" — the user decided not to retry.
+        await withStoreLock(async () => {
+          const { friends = {} } = await getStore("friends");
+          for (const k of msg.keys || []) {
+            if (!friends[k]) continue;
+            delete friends[k].removeFailedAt;
+            delete friends[k].removeError;
+          }
+          await setStore({ friends });
+        });
+        sendResponse({ ok: true });
+        break;
+      }
+      case "getActivityLog": {
+        const { [LOG_KEY]: log = [] } = await getStore(LOG_KEY);
+        sendResponse({ ok: true, log });
+        break;
+      }
+      case "clearActivityLog":
+        await chrome.storage.local.remove(LOG_KEY);
+        sendResponse({ ok: true });
+        break;
+
+      // ---- incoming webhooks (inbound.js)
+      case "inboundInfo":
+        sendResponse({
+          ok: true,
+          settings: await FriendInbound.getSettings(),
+          status: await FriendInbound.getStatus(),
+          endpointUrl: await FriendInbound.endpointUrl(),
+          commands: FriendInbound.COMMANDS,
+        });
+        break;
+      case "inboundSetSettings":
+        sendResponse({ ok: true, settings: await FriendInbound.setSettings(msg.patch || {}) });
+        break;
+      case "inboundTokens":
+        sendResponse(await FriendInbound.listTokens());
+        break;
+      case "inboundTokenCreate":
+        sendResponse(await FriendInbound.createToken(msg.label));
+        break;
+      case "inboundTokenRevoke":
+        sendResponse(await FriendInbound.revokeToken(String(msg.id || "")));
+        break;
+      case "inboundRecent":
+        sendResponse(await FriendInbound.listRecent(20));
+        break;
+      case "inboundPollNow":
+        sendResponse({ ok: true, status: await FriendInbound.poll() });
+        break;
       case "dismissJob": {
         // Clears the result banner for a job that already ended. Never touches
         // a running job — cancelling is a separate, explicit action.
@@ -894,18 +1224,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "wipeAll": {
         const job = await getJob();
         if (job && job.tabId != null) sendToTab(job.tabId, { cmd: "abort" });
-        await chrome.alarms.clear(ALARM_AUTO);
+        if (job && job.status === "running") await endJob(job, "cancelled", "All data was deleted");
         await chrome.alarms.clear(ALARM_REMOVAL);
         await chrome.alarms.clear(ALARM_CLEANUP);
         await chrome.alarms.clear(ALARM_CHAIN);
         await FriendSync.wipeEverywhere();
+        await chrome.storage.local.remove(LOG_KEY);
         sendResponse({ ok: true });
         break;
       }
-      case "runScheduleNow":
+      case "runScheduleNow": {
+        const job = await getJob();
+        if (job && job.status === "running") {
+          sendResponse({ ok: false, error: "A job is already running. Wait for it to finish, or cancel it from its banner." });
+          break;
+        }
         await runScheduledScan(true);
         sendResponse({ ok: true });
         break;
+      }
       case "openDashboard":
         chrome.tabs.create({ url: chrome.runtime.getURL("dashboard/dashboard.html") });
         sendResponse({ ok: true });
@@ -1015,10 +1352,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "jobError": {
         const job = await getJob();
-        if (job) {
-          job.status = "error";
-          job.error = msg.error;
-          await setJob(job);
+        if (job && job.status === "running") {
+          if (job.type === "friendScan" && job.phase === "dates") await endFriendDatesEarly(job, msg.error);
+          else await failJob(job, msg.error);
         }
         sendResponse({ ok: true });
         break;

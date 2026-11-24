@@ -27,10 +27,11 @@
 
   <section id="account" class="account hidden">
     <span id="acctPlan" class="plan"></span>
-    <span id="acctEmail" class="acctemail"></span>
+    <a href="#" id="acctEmail" class="acctemail" title="Open your account on the website"></a>
     <span id="acctUsage" class="usage"></span>
     <span class="acctlinks">
       <a href="#" id="acctUpgrade" class="upgrade hidden">Upgrade to Pro</a>
+      <a href="#" id="acctAccount">My account ↗</a>
       <a href="#" id="acctBilling">Manage plan</a>
       <a href="#" id="acctHelp">Get help</a>
       <a href="#" id="acctSignOut">Sign out</a>
@@ -39,9 +40,8 @@
 
   <section class="toolbar">
     <div class="group">
-      <button id="btnScanFriends" class="primary">1 · Scan friends</button>
-      <button id="btnScanDates" class="primary" title="Walks your Activity Log (Friends category) to capture the real date you became friends with each person">2 · Scan friend dates</button>
-      <button id="btnScanEngagement" class="primary">3 · Scan engagement</button>
+      <button id="btnScanFriends" class="primary" title="Reads your friends list, the order you added them, and (from your Activity Log) the date you became friends">1 · Scan friends</button>
+      <button id="btnScanEngagement" class="primary">2 · Scan engagement</button>
       <label class="inline">scan back:
         <select id="scanDays">
           <option value="7">1 week</option>
@@ -58,7 +58,6 @@
       <button id="btnRemove" class="danger" disabled>Remove selected (0)</button>
       <button id="btnProtect" class="protect-btn" disabled>Protect selected (0)</button>
       <button id="btnUnprotect" class="unprotect-btn" disabled>Unprotect selected (0)</button>
-      <button id="btnCancel" class="ghost">Cancel job</button>
       <button id="btnExport" class="ghost">Export CSV</button>
     </div>
   </section>
@@ -70,6 +69,7 @@
     <label><input type="checkbox" id="fltNoEngagement" /> No engagement only</label>
     <label><input type="checkbox" id="fltHideRemoved" checked /> Hide removed</label>
     <label><input type="checkbox" id="fltHideProtected" checked /> Hide protected</label>
+    <label id="fltFailedWrap" class="fltfailed hidden"><input type="checkbox" id="fltFailed" /> Removal failed only <span id="fltFailedCount" class="count"></span></label>
     <select id="sortBy">
       <option value="score-asc">Least engaged first</option>
       <option value="score-desc">Most engaged first</option>
@@ -94,7 +94,7 @@
           <th>Comments</th>
           <th>Score</th>
           <th>Last engaged</th>
-          <th title="Date you became friends (from your Activity Log). Falls back to #N recency rank from the 'Recently added' list — #1 is your newest friend">Friended</th>
+          <th title="Date you became friends (from your Activity Log, read by Scan friends). Falls back to #N recency rank from the 'Recently added' list — #1 is your newest friend">Friended</th>
           <th>Status</th>
           <th title="Protect a friend so they're never suggested or removed">Protect</th>
         </tr>
@@ -104,7 +104,8 @@
     <div id="empty" class="empty hidden">
       No friends scanned yet. Log in to Facebook in this browser, then click
       <strong>1 · Scan friends</strong>. A Facebook tab will open and load
-      your friends list — leave it alone until the overlay says it's done.
+      your friends list, then your Activity Log for friend dates — leave it
+      alone until the overlay says it's done.
     </div>
     <div id="noMatch" class="empty hidden">No friends match the current filters.</div>
   </section>
@@ -161,8 +162,7 @@
         </label>
         <fieldset class="scanpick">
           <legend>Scans to run</legend>
-          <label><input type="checkbox" id="autoScanFriends" /> Friends list</label>
-          <label><input type="checkbox" id="autoScanDates" /> Friend dates</label>
+          <label><input type="checkbox" id="autoScanFriends" /> Friends (list, order and dates)</label>
           <label><input type="checkbox" id="autoScanEngagement" /> Engagement</label>
         </fieldset>
         <div class="group">
@@ -172,9 +172,77 @@
         <p class="note">
           Scheduled runs open a Facebook tab and take focus while they scroll,
           so pick a cadence you won't mind interrupting you. Only scans can be
-          scheduled — removals only ever run when you start them. Runs are skipped
-          while another job is going, and only fire while Chrome is open.
+          scheduled — removals only ever run when you start them. A run that comes
+          due while another job is going waits for it to finish. Runs only fire
+          while Chrome is open.
         </p>
+      </div>
+    </details>
+    <details id="inboundPanel">
+      <summary>Incoming webhooks <span id="inboundProTag" class="protag hidden">Pro</span> <span class="betatag">Beta</span></summary>
+      <div class="settings auto">
+        <p class="note">
+          Start a scan from anywhere — Zapier, a script, a phone shortcut — by
+          sending a request to your private web address. This browser checks for
+          requests once a minute while Chrome is open, runs them one at a time,
+          and records each one in the activity log. Only scans can be started
+          this way; removals never run remotely.
+        </p>
+        <p id="inboundProNote" class="pronote hidden">
+          Incoming webhooks are part of Pro. <a href="#" id="inboundUpgrade">Upgrade</a> to trigger scans remotely.
+        </p>
+        <label class="switch">
+          <span>This browser answers webhooks</span>
+          <input type="checkbox" id="inboundEnabled" />
+        </label>
+        <fieldset class="scanpick" id="inboundCommands">
+          <legend>Requests it will run</legend>
+        </fieldset>
+        <div class="endpoint">
+          <span class="inline">Send requests to</span>
+          <code id="inboundEndpoint">…</code>
+          <button id="btnCopyEndpoint" class="ghost small">Copy</button>
+        </div>
+        <div class="tokens">
+          <div class="group">
+            <strong>Tokens</strong>
+            <input type="text" id="tokenLabel" placeholder="Label, e.g. Zapier" maxlength="60" />
+            <button id="btnTokenCreate" class="ghost small">Create token</button>
+          </div>
+          <div id="tokenNew" class="tokennew hidden"></div>
+          <ul id="tokenList" class="tokenlist"></ul>
+        </div>
+        <details class="example">
+          <summary>Example request</summary>
+          <pre id="inboundExample"></pre>
+        </details>
+        <div class="group">
+          <button id="btnInboundPoll" class="ghost small">Check for requests now</button>
+          <span id="inboundStatus" class="inline"></span>
+        </div>
+        <p class="diag" id="inboundSetup"></p>
+      </div>
+    </details>
+    <details id="logPanel">
+      <summary>Activity log <span id="logCount" class="count"></span></summary>
+      <div class="settings auto">
+        <div class="group">
+          <label class="inline">Show
+            <select id="logFilter">
+              <option value="all">everything</option>
+              <option value="manual">started by me</option>
+              <option value="schedule">scheduled</option>
+              <option value="webhook">webhooks</option>
+              <option value="problems">problems only</option>
+            </select>
+          </label>
+          <button id="btnLogClear" class="ghost small">Clear log</button>
+        </div>
+        <table class="log">
+          <thead><tr><th>When</th><th>What</th><th>Started by</th><th>Result</th></tr></thead>
+          <tbody id="logRows"></tbody>
+        </table>
+        <p id="logEmpty" class="note hidden">Nothing yet. Every scan and removal is recorded here, with who or what started it.</p>
       </div>
     </details>
     <details>

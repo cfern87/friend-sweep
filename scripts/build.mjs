@@ -29,6 +29,7 @@ const SHIP = [
   'drive.js',
   'sync.js',
   'license.js',
+  'inbound.js',
   'content',
   'dashboard',
   'popup',
