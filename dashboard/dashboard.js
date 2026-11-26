@@ -451,12 +451,13 @@ function render() {
     a.textContent = r.name;
     if (r.nameIsFallback) a.title = "Name not captured yet — re-run “Scan friends” to fill it in";
     tdName.appendChild(a);
-    // Say why someone is suggested: a bare 0 reads like a verdict on the person.
-    if (hasEngagementData && r.score === 0 && !r.removedAt && !r.whitelisted) {
-      const why = document.createElement("div");
-      why.className = "why";
-      why.textContent = whySuggested(r);
-      tdName.appendChild(why);
+    // Flag recent friends who are suggested: a 0 may just mean "too soon to tell".
+    if (hasEngagementData && r.score === 0 && !r.removedAt && !r.whitelisted && isNewFriend(r)) {
+      const tag = document.createElement("span");
+      tag.className = "badge newfriend";
+      tag.textContent = "new friend";
+      tag.title = "Added recently — may not have had a chance to react or comment yet";
+      tdName.appendChild(tag);
     }
 
     const tdR = document.createElement("td");
@@ -1459,37 +1460,10 @@ function renderQueuedRemoval(bar) {
 
 // ------------------------------------------------------------- why suggested
 
-function fmtWindow(days) {
-  const named = { 7: "week", 14: "2 weeks", 30: "month", 60: "2 months", 90: "3 months", 180: "6 months", 365: "year" };
-  return named[days] || `${days} days`;
-}
-
-function fmtAgo(ts) {
-  const days = Math.floor((Date.now() - ts) / 86400000);
-  if (days < 1) return "today";
-  if (days < 45) return `${days} day${days === 1 ? "" : "s"} ago`;
-  const months = Math.round(days / 30);
-  return months < 18 ? `${months} months ago` : `${Math.round(days / 365)} years ago`;
-}
-
-// One plain-language line explaining a friend's place in the list.
-function whySuggested(r) {
-  const parts = [];
-  if (r.score > 0) {
-    parts.push(`${r.reactions} reaction${r.reactions === 1 ? "" : "s"}, ${r.comments} comment${r.comments === 1 ? "" : "s"}` +
-      (r.lastAt ? `, last ${fmtAgo(r.lastAt)}` : ""));
-  } else {
-    const d = lastEngagementScan && lastEngagementScan.days;
-    parts.push(d ? `No reactions or comments on your posts in the last ${fmtWindow(d)}` : "No reactions or comments on the posts scanned");
-  }
-  if (r.friendedAt) {
-    const since = new Date(r.friendedAt).toLocaleDateString(undefined, { month: "short", year: "numeric" });
-    const fresh = Date.now() - r.friendedAt < 60 * 86400000;
-    parts.push(fresh ? `friends since ${since} — new, may not have had a chance yet` : `friends since ${since}`);
-  } else if (r.rank !== null && r.rank < 20) {
-    parts.push("one of your newest friends — may not have had a chance yet");
-  }
-  return parts.join(" · ");
+// Friended in the last 60 days (or, with no date, among the 20 newest).
+function isNewFriend(r) {
+  if (r.friendedAt) return Date.now() - r.friendedAt < 60 * 86400000;
+  return r.rank !== null && r.rank < 20;
 }
 
 // ------------------------------------------------------------- first-run checklist
@@ -1581,7 +1555,7 @@ function renderReview() {
   $("rvPhoto").src = r.photo || "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
   $("rvName").textContent = r.name;
   $("rvName").href = r.url;
-  $("rvWhy").textContent = whySuggested(r);
+  $("rvWhy").textContent = isNewFriend(r) ? "New friend — may not have had a chance to react or comment yet" : "";
   $("rvReactions").textContent = r.reactions;
   $("rvComments").textContent = r.comments;
   $("rvLast").textContent = r.lastAt ? fmtDate(r.lastAt) : "never";
