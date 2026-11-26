@@ -325,6 +325,10 @@ function visibleRows(opts = {}) {
     const a = agg[f.key];
     return {
       ...f,
+      // Off the friends list without the extension's help (a scan stopped
+      // finding them) — shown and filtered like a removal.
+      gone: !f.removedAt && !!f.goneAt,
+      removedAt: f.removedAt || f.goneAt || null,
       name: f.name || slugOf(f),
       nameIsFallback: !f.name,
       reactions: a ? a.reactions : 0,
@@ -383,12 +387,15 @@ function render() {
 
   const total = Object.keys(friends).length;
   const removed = Object.values(friends).filter((f) => f.removedAt).length;
-  const protectedCount = Object.values(friends).filter((f) => f.whitelisted).length;
+  const gone = Object.values(friends).filter((f) => !f.removedAt && f.goneAt).length;
+  const current = total - removed - gone;
+  const protectedCount = Object.values(friends).filter((f) => f.whitelisted && !f.removedAt && !f.goneAt).length;
   const scannedEvents = Object.keys(engagement).length;
   const failedCount = Object.values(friends).filter((f) => !f.removedAt && f.removeFailedAt).length;
   $("stats").innerHTML =
-    `<b>${total}</b> friends · <b>${scannedEvents}</b> engagement events · ` +
+    `<b>${current}</b> friends · <b>${scannedEvents}</b> engagement events · ` +
     `<b>${protectedCount}</b> protected · <b>${removed}</b> removed` +
+    (gone ? ` · <span title="No longer on your Facebook friends list — they unfriended you, left Facebook, or were removed outside Friend Sweep"><b>${gone}</b> no longer friends</span>` : "") +
     (failedCount ? ` · <a href="#" id="statFailed" class="statfailed"><b>${failedCount}</b> couldn't be removed</a>` : "");
   const statFailed = $("statFailed");
   if (statFailed) statFailed.addEventListener("click", (e) => { e.preventDefault(); showFailedRemovals(); });
@@ -486,7 +493,9 @@ function render() {
     }
 
     const tdStatus = document.createElement("td");
-    if (r.removedAt) {
+    if (r.gone) {
+      tdStatus.innerHTML = '<span class="badge removed" title="Your last friend scan did not find them on your friends list">no longer friends</span>';
+    } else if (r.removedAt) {
       tdStatus.innerHTML = r.removedManually
         ? '<span class="badge removed" title="You removed them on Facebook and marked it here">removed by hand</span>'
         : '<span class="badge removed">removed</span>';
@@ -522,7 +531,7 @@ function render() {
   renderChecklist();
   renderDailyMeter();
   const navCount = $("navFriendsCount");
-  navCount.textContent = failedCount ? `${failedCount} to fix` : total ? String(total - removed) : "";
+  navCount.textContent = failedCount ? `${failedCount} to fix` : total ? String(current) : "";
   navCount.classList.toggle("alert", failedCount > 0);
   renderJob();
   updateActionButtons();
@@ -592,7 +601,7 @@ function updateSelAllState() {
 // The selection can hold a mix of protected and unprotected friends, so each
 // action is labelled with the count it would actually affect.
 function selectionSplit() {
-  const live = [...selected].filter((k) => friends[k] && !friends[k].removedAt);
+  const live = [...selected].filter((k) => friends[k] && !friends[k].removedAt && !friends[k].goneAt);
   // Unprotected + not removed is exactly the set that can be queued OR protected.
   return {
     open: live.filter((k) => !friends[k].whitelisted),
@@ -679,7 +688,8 @@ function jobHeadline(j) {
   const p = j.progress || {};
   if (j.type === "friendScan") {
     const step = { all: "1 of 3: friends list", recent: "2 of 3: friend order", dates: "3 of 3: friend dates" }[j.phase] || "";
-    const counts = `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} dated` : "");
+    const counts = `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} dated` : "") +
+      (p.gone ? `, ${p.gone} no longer friends` : "");
     return j.status === "running"
       ? `Scanning friends — step ${step} — ${counts}`
       : `Friend scan ${j.status} — ${counts}`;

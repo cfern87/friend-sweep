@@ -243,7 +243,7 @@
     if (!friends.length) return false; // empty API result is suspicious; use DOM
     const withId = friends.filter((f) => f.profileId).length;
     log("friend scan: captured", friends.length, "friends via API,", withId, "with numeric ids");
-    await send({ cmd: "friendScanResult", friends, phase: "all", done: true });
+    await send({ cmd: "friendScanResult", friends, phase: "all", done: true, complete: !!result.complete });
     showHud(`${friends.length} friends captured via API — now capturing friend order…`);
     await sleep(3000);
     hideHud();

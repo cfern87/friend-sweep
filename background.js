@@ -138,7 +138,8 @@ const JOB_LABELS = {
 function describeJob(job) {
   const p = job.progress || {};
   if (job.type === "friendScan") {
-    return `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} with friend dates` : "");
+    return `${p.found || 0} friends found` + (p.dated ? `, ${p.dated} with friend dates` : "") +
+      (p.gone ? `, ${p.gone} no longer on your friends list` : "");
   }
   if (job.type === "engagementScan") {
     return `${p.posts || 0} posts checked, ${p.events || 0} new reactions/comments` +
@@ -224,7 +225,7 @@ async function currentSuggestions() {
   const engaged = new Set(Object.values(engagement).map((e) => e.friendKey));
   for (const f of Object.values(friends)) if (f.syncEng && (f.syncEng[0] || f.syncEng[1])) engaged.add(f.key);
   return Object.values(friends)
-    .filter((f) => !f.removedAt && !f.whitelisted && !engaged.has(f.key))
+    .filter((f) => !f.removedAt && !f.goneAt && !f.whitelisted && !engaged.has(f.key))
     .map((f) => ({ name: f.name || "", url: f.url || "", friendedAt: f.friendedAt ? new Date(f.friendedAt).toISOString().slice(0, 10) : null }));
 }
 
@@ -484,7 +485,7 @@ async function startRemoval(friendKeys) {
   const { friends = {}, settings = {} } = await getStore(["friends", "settings"]);
   const cap = settings.maxRemovalsPerRun || 20;
   let queue = friendKeys
-    .filter((k) => friends[k] && !friends[k].removedAt && !friends[k].whitelisted)
+    .filter((k) => friends[k] && !friends[k].removedAt && !friends[k].goneAt && !friends[k].whitelisted)
     .slice(0, cap);
   if (!queue.length) return { ok: false, error: "Nobody in the selection can be removed." };
 
@@ -699,13 +700,54 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 // ---------------------------------------------------------------- results
 
+// A DOM scroll-scan that stops early (Facebook stalls loading) looks just like
+// a finished one. Unless the API said the list was whole, only trust a pass
+// that saw at least this share of the friends we already knew.
+const PRUNE_MIN_SHARE = 0.9;
+
+// After a full pass of the friends list, anyone on record who wasn't in it has
+// left the list outside the extension (unfriended on Facebook, deactivated,
+// changed their profile URL). Mark them `goneAt` rather than deleting them, so
+// protection and history survive if they come back; the next scan that sees
+// them clears it. Returns a warning when the pass looked too short to trust.
+function pruneUnseenFriends(friends, scanStartedAt, complete, now) {
+  const known = Object.values(friends).filter((f) => !f.removedAt && !f.goneAt);
+  const seen = known.filter((f) => (f.lastSeen || 0) >= scanStartedAt);
+  const unseen = known.filter((f) => (f.lastSeen || 0) < scanStartedAt);
+  if (!unseen.length) return { gone: 0 };
+  if (!seen.length || (!complete && seen.length < known.length * PRUNE_MIN_SHARE)) {
+    return {
+      gone: 0,
+      warning: `The scan saw ${seen.length} of the ${known.length} friends on record, which looks incomplete, ` +
+        "so nobody was marked as no longer a friend. Run Scan friends again to update the count.",
+    };
+  }
+  // A changed profile URL shows up as a new key with the same numeric id:
+  // carry protection over so it isn't lost with the old record.
+  const byId = new Map(seen.filter((f) => f.profileId).map((f) => [f.profileId, f]));
+  for (const f of unseen) {
+    f.goneAt = now;
+    const twin = f.profileId && byId.get(f.profileId);
+    if (twin && f.whitelisted && !twin.whitelisted) {
+      twin.whitelisted = true;
+      twin.whitelistedAt = now;
+    }
+  }
+  return { gone: unseen.length };
+}
+
 async function handleFriendScanResult(msg) {
   const now = Date.now();
+  const job = await getJob();
+  const ownJob = job && job.type === "friendScan" && job.status === "running";
+  // The full-list phase finished: prune whoever it didn't see.
+  const prune = ownJob && msg.done && msg.phase === "all" && job.phase === "all";
+  let pruned = { gone: 0 };
   const friends = await withStoreLock(async () => {
     const { friends = {} } = await getStore("friends");
     msg.friends.forEach((f, i) => {
       const prev = friends[f.key];
-      friends[f.key] = {
+      const next = friends[f.key] = {
         ...prev,
         key: f.key,
         name: cleanName(f.name) || cleanName(prev && prev.name) || "",
@@ -719,14 +761,23 @@ async function handleFriendScanResult(msg) {
         // index is a friendship-recency rank (0 = most recently added).
         ...(msg.phase === "recent" ? { recentRank: i } : {}),
       };
+      // On the list again (re-friended, or a short scan misjudged them).
+      delete next.goneAt;
     });
+    if (prune) pruned = pruneUnseenFriends(friends, job.startedAt, !!msg.complete, now);
     await setStore({ friends });
     return friends;
   });
 
-  const job = await getJob();
   if (!job || job.type !== "friendScan") return;
-  job.progress.found = Object.keys(friends).length;
+  // Friends seen by this scan, not every record ever stored.
+  job.progress.found = Object.values(friends)
+    .filter((f) => !f.removedAt && (f.lastSeen || 0) >= job.startedAt).length;
+  if (pruned.gone) job.progress.gone = pruned.gone;
+  if (pruned.warning) {
+    const warnings = Array.isArray(job.warnings) ? job.warnings : [];
+    if (!warnings.includes(pruned.warning)) job.warnings = warnings.concat(pruned.warning);
+  }
   // A stray "done" from a page the job has already moved past changes nothing.
   if (msg.done && msg.phase && msg.phase !== job.phase) return;
   if (msg.done) {
@@ -761,7 +812,6 @@ async function endFriendDatesEarly(job, error) {
 }
 
 async function handleFriendDatesResult(msg) {
-  const now = Date.now();
   const friends = await withStoreLock(async () => {
     const { friends = {} } = await getStore("friends");
 
@@ -769,6 +819,7 @@ async function handleFriendDatesResult(msg) {
     // matched by exact name — but only when the name is unambiguous.
     const byName = new Map();
     for (const f of Object.values(friends)) {
+      if (f.goneAt) continue;
       const n = (f.name || "").toLowerCase();
       if (!n) continue;
       if (!byName.has(n)) byName.set(n, []);
@@ -781,17 +832,9 @@ async function handleFriendDatesResult(msg) {
         const candidates = byName.get(e.name.toLowerCase()) || [];
         if (candidates.length === 1) key = candidates[0];
       }
-      if (!key) continue;
-      if (!friends[key]) {
-        friends[key] = {
-          key,
-          name: cleanName(e.name),
-          url: e.url || "",
-          photo: "",
-          firstSeen: now,
-          lastSeen: now,
-        };
-      }
+      // The Activity Log also lists people you've since unfriended, so it only
+      // dates friends the list scan found; it never adds anyone.
+      if (!key || !friends[key] || friends[key].goneAt) continue;
       friends[key].friendedAt = e.friendedAt;
     }
     await setStore({ friends });
@@ -801,7 +844,7 @@ async function handleFriendDatesResult(msg) {
   const job = await getJob();
   if (job && job.status === "running" &&
       (job.type === "friendDatesScan" || (job.type === "friendScan" && job.phase === "dates"))) {
-    job.progress.dated = Object.values(friends).filter((f) => f.friendedAt).length;
+    job.progress.dated = Object.values(friends).filter((f) => f.friendedAt && !f.goneAt).length;
     if (msg.done) await finishJob(job);
     else await setJob(job);
   }

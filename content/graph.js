@@ -628,6 +628,8 @@
     let pages = 0;
     let total = 0;
     let loggedShape = false;
+    // True only when Facebook said there's no next page — the list is whole.
+    let complete = false;
     for (;;) {
       const objects = await sendForged("user_friends", varsFor(cursor));
       const conn = findConnection(objects);
@@ -668,10 +670,11 @@
       const next = pageInfo.end_cursor || null;
       // Stop on last page, missing cursor, a cursor that didn't advance (guards
       // against a stuck loop), or the page cap.
-      if (!pageInfo.has_next_page || !next || next === cursor || pages >= maxPages) break;
+      if (!pageInfo.has_next_page) { complete = true; break; }
+      if (!next || next === cursor || pages >= maxPages) break;
       cursor = next;
     }
-    return { ok: true, total };
+    return { ok: true, total, complete };
   }
 
   // Resolve a single friend's numeric id by searching the friends collection by
