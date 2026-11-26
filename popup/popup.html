@@ -10,7 +10,8 @@
       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
       color: #1c2b33;
     }
-    h1 { font-size: 15px; margin: 0 0 10px; }
+    h1 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .version { font-size: 11px; font-weight: 400; color: #65676b; opacity: 0.8; white-space: nowrap; }
     .stat { color: #65676b; font-size: 13px; margin-bottom: 12px; }
     .stat b { color: #1c2b33; }
     .acct {
@@ -53,7 +54,7 @@
   </style>
 </head>
 <body>
-  <h1>Not Another Friend Sweeper</h1>
+  <h1>Not Another Friend Sweeper <span id="version" class="version" title="Extension version"></span></h1>
 
   <div id="signedOut" class="hidden">
     <div class="stat">Sign in with a free account to start scanning your friends list.</div>

@@ -4,6 +4,7 @@
 // wipe) go through the worker too, which stamps them for cross-browser sync.
 
 const $ = (id) => document.getElementById(id);
+try { $("navVersion").textContent = "v" + chrome.runtime.getManifest().version; } catch (e) { /* cosmetic */ }
 
 const SETTINGS_DEFAULTS = {
   maxRemovalsPerRun: 20,

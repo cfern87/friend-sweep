@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
+try { $("version").textContent = "v" + chrome.runtime.getManifest().version; } catch (e) { /* cosmetic */ }
+
 function esc(s) {
   return String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 }
