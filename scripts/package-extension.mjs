@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Release step: build the extension, produce the Chrome Web Store upload zip at
 // <repo>/dist/<name>-<version>.zip, then upload it and submit it for review
-// (scripts/publish-extension.mjs). `npm run deploy`.
+// (scripts/publish-extension.mjs). `npm run deploy`. On a successful submit it
+// commits the version bump + zip and tags that commit v<version>
+// (scripts/release-tag.mjs) — locally only, nothing is pushed.
 //
 //   --no-publish   build and zip only (what `npm run package` used to do)
 //   --staged       after approval, hold the release until you click Publish
@@ -27,6 +29,7 @@ import { join, dirname, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { build } from './build.mjs';
 import { createZip } from './zip.mjs';
+import { commitAndTag } from './release-tag.mjs';
 import {
   PROD_EXTENSION_ID, assertItemId, loadCredentials, publish, printSetupHelp, PublishError,
 } from './publish-extension.mjs';
@@ -134,4 +137,11 @@ if (shouldPublish) {
     console.error(`    The zip is still at ${outRel}\n`);
     process.exit(1);
   }
+
+  // 7. Record what went out: commit the version bump + zip, tag it v<version>.
+  commitAndTag({
+    root,
+    version,
+    paths: [outFile, join(root, 'manifest.json'), join(root, 'package.json')],
+  });
 }
