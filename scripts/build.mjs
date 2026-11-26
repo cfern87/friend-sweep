@@ -10,7 +10,7 @@
 //   npm run build                 bump patch, then build
 //   BUMP=minor npm run build      see scripts/bump-version.mjs
 //   node scripts/build.mjs --no-bump   rebuild at the current version
-//                                      (used by package-extension.mjs)
+//   SKIP_VERSION_BUMP=1 npm run build  same (used by the post-merge hook)
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import { dirname, join, relative, resolve } from 'path';
@@ -78,5 +78,5 @@ export function build({ bump = true } = {}) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  build({ bump: !process.argv.includes('--no-bump') });
+  build({ bump: !process.argv.includes('--no-bump') && !process.env.SKIP_VERSION_BUMP });
 }

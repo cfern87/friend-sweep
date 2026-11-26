@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-// Release step: rebuild the extension at its CURRENT version (no bump), then
-// produce the Chrome Web Store upload zip at <repo>/dist/<name>-<version>.zip.
+// Release step: build the extension, produce the Chrome Web Store upload zip at
+// <repo>/dist/<name>-<version>.zip, then upload it and submit it for review
+// (scripts/publish-extension.mjs). `npm run deploy`.
 //
-// Run `npm run build` first when you want a new version number; this step
-// never bumps, so the filename always matches the manifest that actually went
-// into the archive, and packaging twice doesn't burn a version.
+//   --no-publish   build and zip only (what `npm run package` used to do)
+//   --staged       after approval, hold the release until you click Publish
+//
+// Run it deliberately before a submission — NOT from a git hook. Every build
+// bumps the version, so building here, on demand, means the filename always
+// reflects the manifest that actually went into the archive.
 //
 // Things this script exists to get right, all easy to botch by hand and
 // invisible until the Web Store rejects the upload:
@@ -23,6 +27,12 @@ import { join, dirname, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { build } from './build.mjs';
 import { createZip } from './zip.mjs';
+import {
+  PROD_EXTENSION_ID, assertItemId, loadCredentials, publish, printSetupHelp, PublishError,
+} from './publish-extension.mjs';
+
+const args = new Set(process.argv.slice(2));
+const shouldPublish = !args.has('--no-publish');
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = join(root, 'dist');
@@ -54,9 +64,10 @@ function fail(message) {
   process.exit(1);
 }
 
-// 1. Build at the current version.
+// 1. Build — which bumps the version, like every build (SKIP_VERSION_BUMP=1 to
+//    re-package the current version).
 console.log('  Building extension ...\n');
-const { version, outDir: buildDir } = build({ bump: false });
+const { version, outDir: buildDir } = build({ bump: !process.env.SKIP_VERSION_BUMP });
 
 // 2. Read the built manifest and strip `key` for the packaged copy only.
 const manifest = JSON.parse(readFileSync(join(buildDir, 'manifest.json'), 'utf8'));
@@ -92,6 +103,35 @@ const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
 console.log(`\n  Packaged ${files.length} files -> ${relative(root, outFile).replace(/\\/g, '/')}` +
             `  (${kb(statSync(outFile).size)})${replaced ? '  [replaced]' : ''}`);
 console.log(`  v${version}` + (hadKey ? '  ·  `key` stripped for upload' : ''));
-console.log('\n  Upload it at https://chrome.google.com/webstore/devconsole');
-console.log('  (Edge: https://partner.microsoft.com/dashboard/microsoftedge — same zip).');
+console.log(`\n  Web Store item ${PROD_EXTENSION_ID || '(PROD_EXTENSION_ID not set)'}`);
+console.log('  (Edge: https://partner.microsoft.com/dashboard/microsoftedge — same zip, by hand).');
 console.log('  Local dev is unaffected — load build/ (or the repo folder) unpacked as before.\n');
+
+// 6. Upload and submit. A machine with no credentials still gets its zip, with
+//    a note on what's missing, but exits non-zero: `deploy` didn't deploy.
+if (shouldPublish) {
+  const outRel = relative(root, outFile).replace(/\\/g, '/');
+  const loaded = loadCredentials();
+  if (loaded.missing) {
+    printSetupHelp(loaded.missing);
+    console.log(`  The zip is ready to upload by hand: ${outRel}\n`);
+    process.exit(1);
+  }
+  try {
+    assertItemId();
+    const r = await publish({
+      creds: loaded.creds,
+      itemId: PROD_EXTENSION_ID,
+      zipPath: outFile,
+      expectedVersion: version,
+      staged: args.has('--staged'),
+    });
+    console.log(`  Submitted v${r.version} to the Chrome Web Store: ${r.state}`);
+    for (const w of r.warnings) console.log(`  ! ${w.reason}: ${w.description}`);
+    console.log('');
+  } catch (e) {
+    console.error(`\n  x Publish failed: ${e instanceof PublishError ? e.message : e.stack}`);
+    console.error(`    The zip is still at ${outRel}\n`);
+    process.exit(1);
+  }
+}

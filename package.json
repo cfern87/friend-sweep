@@ -5,8 +5,9 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build.mjs",
-    "package": "node scripts/package-extension.mjs",
-    "icons": "node scripts/render-icons.mjs"
+    "deploy": "node scripts/package-extension.mjs",
+    "icons": "node scripts/render-icons.mjs",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@resvg/resvg-js": "2.6.2"

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Rebuild build/ after a pull.
+#
+# WHY: build/ is gitignored, so `git pull` updates the source but leaves the
+# browser loading the previous build. Reloading the extension re-reads that
+# same stale build/, which looks exactly like "the new feature didn't come
+# across". This hook closes that gap automatically.
+#
+# Requires `git config core.hooksPath .githooks` — `npm install` does that via
+# the "prepare" script.
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 0
+
+ship='^(manifest\.json|background\.js|drive\.js|sync\.js|license\.js|inbound\.js|content/|dashboard/|popup/|icons/)'
+if ! git diff --name-only ORIG_HEAD HEAD 2>/dev/null | grep -qE "$ship"; then
+  exit 0
+fi
+
+echo ""
+echo "  Extension source changed — rebuilding build/ ..."
+if SKIP_VERSION_BUMP=1 npm run build --silent; then
+  echo "  ✔ Rebuilt. Reload the extension at chrome://extensions to pick it up."
+else
+  echo ""
+  echo "  ! BUILD FAILED — the browser is still running the OLD build."
+  echo "  ! Fix the error above, then: npm run build"
+fi
+echo ""
+
+exit 0

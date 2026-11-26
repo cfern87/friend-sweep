@@ -92,13 +92,18 @@ npm run icons
 
 `icon.svg` is the 128 px store icon (96 px artwork, 16 px transparent padding, as the Web Store asks); `icon-small.svg` (32/48 px) and `icon-16.svg` fill their square with bolder strokes so they stay legible in the toolbar. Commit the SVGs and the PNGs together.
 
-### Package for the Chrome Web Store
+### Deploy to the Chrome Web Store
 
 ```bash
-npm run package
+npm run deploy                    # build (bumps the version), zip, upload, submit for review
+npm run deploy -- --staged        # same, but after approval it waits for you to click Publish
+npm run deploy -- --no-publish    # build and zip only (the old `npm run package`)
+node scripts/publish-extension.mjs --status   # read-only: credentials check + store state
 ```
 
-Rebuilds `build/` at the **current** version (no bump) and writes the upload zip to `dist/friend-sweep-<version>.zip`. Run `npm run build` first when you want a new version number — packaging never bumps, so the filename always matches the manifest inside it, and packaging twice doesn't burn a version. The script refuses to write a package whose manifest isn't at the archive root, that references a missing file, or that carries a `key` field. The same zip uploads to Edge Add-ons.
+Builds `build/` (bumping the version, like every build) and writes the upload zip to `dist/not-another-friend-sweeper-<version>.zip`. It then uploads the zip to the store item through the Chrome Web Store API v2 and submits it. The script refuses to write a package whose manifest isn't at the archive root, that references a missing file, or that carries a `key` field. Without credentials it still writes the zip, then exits 1 and lists what's missing. One-time credential setup: [docs/chrome-web-store-publishing.md](docs/chrome-web-store-publishing.md). The same zip uploads to Edge Add-ons by hand.
+
+After a `git pull`, the post-merge hook rebuilds `build/` without bumping, so the unpacked extension isn't left running stale code (`npm install` turns the hooks on).
 
 ## Use
 

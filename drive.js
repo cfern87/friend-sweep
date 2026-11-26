@@ -43,7 +43,17 @@ const FriendDrive = (() => {
 
   // `openid email` lets us learn the account, and login_hint is what stops a
   // silent renewal failing on a browser signed into several Google accounts.
-  const SCOPES = "https://www.googleapis.com/auth/drive.appdata openid email";
+  const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+  const SCOPES = DRIVE_SCOPE + " openid email";
+  // Google's consent page lists each scope as its own checkbox, so a sign-in
+  // can succeed while leaving Drive unticked. Every Drive call then 403s.
+  const SCOPE_NOT_GRANTED =
+    "Google Drive access wasn't granted. Reconnect and tick the box that lets FriendSweep see, create and delete its own configuration data in your Google Drive.";
+
+  function grantsDrive(scopes) {
+    const list = Array.isArray(scopes) ? scopes : String(scopes || "").split(/\s+/);
+    return list.includes(DRIVE_SCOPE);
+  }
 
   const TOKEN_CACHE_KEY = "fsDriveToken";
   const ACCOUNT_EMAIL_KEY = "fsDriveEmail";
@@ -175,6 +185,12 @@ const FriendDrive = (() => {
             finish(null, (e && e.message) || "Chrome returned no token.");
             return;
           }
+          // Newer Chrome reports what was actually granted; older returns a bare string.
+          if (result && Array.isArray(result.grantedScopes) && !grantsDrive(result.grantedScopes)) {
+            browserForgetToken(token);
+            finish(null, SCOPE_NOT_GRANTED);
+            return;
+          }
           lastAuthError = "";
           finish(token);
         });
@@ -246,7 +262,9 @@ const FriendDrive = (() => {
       scope: SCOPES,
     });
     if (interactive) {
-      params.set("prompt", "select_account");
+      // `consent` re-shows the Drive checkbox even if an earlier sign-in left it
+      // unticked; without it Google silently re-issues the partial grant.
+      params.set("prompt", "select_account consent");
     } else {
       params.set("prompt", "none");
       // Without this, prompt=none fails with account_selection_required on any
@@ -266,6 +284,12 @@ const FriendDrive = (() => {
     }
     const token = frag.get("access_token");
     if (!token) return null;
+    // The fragment's `scope` lists what was actually granted.
+    const granted = frag.get("scope");
+    if (granted !== null && !grantsDrive(granted)) {
+      if (interactive) lastAuthError = SCOPE_NOT_GRANTED;
+      return null;
+    }
     const cached = { token, expiresAt: Date.now() + Number(frag.get("expires_in") || "3600") * 1000 };
     await put(TOKEN_CACHE_KEY, cached);
     lastAuthError = "";
@@ -439,6 +463,11 @@ const FriendDrive = (() => {
       }
       if (res.status === 403 || res.status === 429 || res.status >= 500) {
         const reason = await failureReason(res);
+        if (res.status === 403 && /insufficient(Permissions|.*scope)/i.test(reason)) {
+          // A token from before the scope check: drop it so Reconnect starts clean.
+          await invalidateToken(token);
+          throw new DriveError(SCOPE_NOT_GRANTED, 403, "insufficient_scope");
+        }
         // A bare 403 is almost always throttling; a real permission problem
         // won't be fixed by retrying.
         const retryable = res.status !== 403 || /rateLimit|userRateLimit|quota|backendError/i.test(reason);

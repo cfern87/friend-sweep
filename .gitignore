@@ -1,3 +1,6 @@
 # `npm run build` output — regenerated on every build, load it unpacked.
 build/
 node_modules/
+
+# Chrome Web Store API credentials for scripts/publish-extension.mjs
+.cws-credentials.json
