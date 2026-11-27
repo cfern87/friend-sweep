@@ -22,7 +22,14 @@
   // ------------------------------------------------------------- HUD
 
   let hud = null;
+  // Removal jobs dim the whole page and show a large "don't close this
+  // window" notice instead of the small pill, because closing the tab
+  // mid-removal leaves the job half done. Set by the removal entry points.
+  let removalOverlay = false;
+  let overlay = null;
+
   function showHud(text) {
+    if (removalOverlay) return showOverlay(text);
     if (!hud) {
       hud = document.createElement("div");
       hud.className = "friendsweep-hud";
@@ -30,9 +37,36 @@
     }
     hud.textContent = "Not Another Friend Sweeper — " + text;
   }
+
+  function showOverlay(text) {
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "friendsweep-overlay";
+      overlay.innerHTML =
+        '<div class="friendsweep-overlay-card" role="alertdialog" aria-live="assertive">' +
+        '<div class="friendsweep-overlay-brand">Not Another Friend Sweeper</div>' +
+        '<div class="friendsweep-overlay-title"></div>' +
+        '<div class="friendsweep-overlay-sub"></div>' +
+        '<div class="friendsweep-overlay-status"></div>' +
+        "</div>";
+      document.documentElement.appendChild(overlay);
+    }
+    const finished = /^done\b/i.test(text);
+    overlay.classList.toggle("is-done", finished);
+    overlay.querySelector(".friendsweep-overlay-title").textContent = finished
+      ? "All done — you can close this window"
+      : "Removing friends — don't close this window";
+    overlay.querySelector(".friendsweep-overlay-sub").textContent = finished
+      ? ""
+      : "Closing this window or tab stops the removal partway through. Leave it open and don't click on the page; it will tell you when it's finished.";
+    overlay.querySelector(".friendsweep-overlay-status").textContent = text;
+  }
+
   function hideHud() {
     if (hud) hud.remove();
     hud = null;
+    if (overlay) overlay.remove();
+    overlay = null;
   }
 
   // ------------------------------------------------------------- helpers
@@ -838,6 +872,7 @@
   }
 
   async function runUnfriend(friend) {
+    removalOverlay = true;
     showHud(`removing ${friend.name}…`);
     const fail = async (error) => {
       showHud(`could not remove ${friend.name}: ${error}`);
@@ -943,6 +978,7 @@
     const delays = (job && job.delays) || { minSec: 20, maxSec: 45 };
     const total = friends.length;
 
+    removalOverlay = true;
     showHud(`removing ${total} friend${total === 1 ? "" : "s"} via API… don't touch this tab`);
     log("batch removal starting for", total, "friend(s)");
 
