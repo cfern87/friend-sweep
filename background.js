@@ -466,8 +466,14 @@ async function startEngagementScan(opts = {}) {
 }
 
 // Removals wait this long before anything is sent, so "Undo" in the banner
-// can call them off. Chrome's alarm floor is 30s, which is exactly this.
-const UNDO_MS = 30000;
+// can call them off. Adjustable in Settings (undoDelaySec, 0 = start at once).
+const DEFAULT_UNDO_SEC = 30;
+const MAX_UNDO_SEC = 300;
+function undoMsFrom(settings) {
+  const sec = Number(settings && settings.undoDelaySec);
+  if (!Number.isFinite(sec)) return DEFAULT_UNDO_SEC * 1000;
+  return Math.round(Math.min(MAX_UNDO_SEC, Math.max(0, sec))) * 1000;
+}
 const ALARM_REMOVAL_START = "removal-start";
 const DEFAULT_DAILY_CAP = 40;
 
@@ -519,12 +525,15 @@ async function startRemoval(friendKeys) {
   const minSec = Math.max(30, settings.removeDelayMinSec || 30);
   const maxSec = Math.max(minSec, settings.removeDelayMaxSec || 60);
   // Queued, not started: nothing touches Facebook until the undo window ends.
+  const undoMs = undoMsFrom(settings);
+  const queuedAt = Date.now();
+  const startsAt = queuedAt + undoMs;
   await setJob({
     type: "removal",
     mode: "batch",
     status: "queued",
-    queuedAt: Date.now(),
-    startsAt: Date.now() + UNDO_MS,
+    queuedAt,
+    startsAt,
     queue,
     done: [],
     failed: [],
@@ -533,12 +542,42 @@ async function startRemoval(friendKeys) {
     delays: { minSec, maxSec },
     ...(warnings.length ? { warnings } : {}),
   });
-  chrome.alarms.create(ALARM_REMOVAL_START, { delayInMinutes: UNDO_MS / 60000 });
-  return { ok: true, trimmed, queued: queue.length, startsAt: Date.now() + UNDO_MS };
+  if (!undoMs) {
+    await startQueuedRemoval();
+  } else {
+    // Chrome won't fire an alarm sooner than 30s, so a shorter window is timed
+    // in the worker; the alarm stays as a backup in case the worker is
+    // suspended first (startQueuedRemoval only runs a job that's still queued).
+    if (undoMs < 30000) setTimeout(startQueuedRemoval, undoMs);
+    chrome.alarms.create(ALARM_REMOVAL_START, { when: startsAt });
+  }
+  return { ok: true, trimmed, queued: queue.length, startsAt };
 }
 
-// The undo window is over: open Facebook and start removing.
+// "Run now" in the banner: skip the rest of the undo window.
+async function runQueuedRemovalNow() {
+  const job = await getJob();
+  if (!job || job.type !== "removal" || job.status !== "queued") return;
+  job.startsAt = Date.now();
+  await setJob(job);
+  await chrome.alarms.clear(ALARM_REMOVAL_START);
+  await startQueuedRemoval();
+}
+
+// The undo window is over: open Facebook and start removing. The timer, the
+// backup alarm and "Run now" can all land here, so only the first one starts it.
+let removalStarting = false;
 async function startQueuedRemoval() {
+  if (removalStarting) return;
+  removalStarting = true;
+  try {
+    await startQueuedRemovalOnce();
+  } finally {
+    removalStarting = false;
+  }
+}
+
+async function startQueuedRemovalOnce() {
   const job = await getJob();
   if (!job || job.type !== "removal" || job.status !== "queued") return;
   if (Date.now() < job.startsAt - 1000) {
@@ -1257,6 +1296,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         sendResponse(await startRemoval(msg.friendKeys || []));
+        break;
+      case "runQueuedNow":
+        await runQueuedRemovalNow();
+        sendResponse({ ok: true });
         break;
       case "cancelJob": {
         const job = await getJob();

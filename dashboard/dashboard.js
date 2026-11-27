@@ -11,6 +11,8 @@ const SETTINGS_DEFAULTS = {
   removeDelayMinSec: 30,
   removeDelayMaxSec: 60,
   maxRemovalsPerDay: 40,
+  // Seconds between pressing Remove and anything reaching Facebook (0 = off).
+  undoDelaySec: 30,
   // Protected friends are ones you've already decided to keep, so they're
   // noise in a clean-up list — hidden until you ask for them.
   hideProtected: true,
@@ -852,6 +854,7 @@ function renderSettings() {
   $("setMaxPerDay").value = settings.maxRemovalsPerDay;
   $("setDelayMin").value = settings.removeDelayMinSec;
   $("setDelayMax").value = settings.removeDelayMaxSec;
+  $("setUndoSec").value = undoSec();
   if (settings.scanDays) $("scanDays").value = String(settings.scanDays);
 }
 
@@ -1043,7 +1046,7 @@ function confirmAndRemove(queue, skipped = 0) {
   const skipNote = skipped
     ? `\n\n${skipped} protected ${skipped === 1 ? "friend" : "friends"} in the selection will be skipped — use "Unprotect selected" first if you meant to include them.`
     : "";
-  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}${dayNote}${allowanceNote}\n\nYou'll have 30 seconds to undo before anything is sent to Facebook. After that it can't be undone by the extension.`)) return false;
+  if (!confirm(`Unfriend ${queue.length} people${capNote}?\n\n${preview}${skipNote}${dayNote}${allowanceNote}\n\n${undoNote()}`)) return false;
   runCmd({ cmd: "startRemoval", friendKeys: queue });
   return true;
 }
@@ -1155,6 +1158,10 @@ $("btnSaveSettings").addEventListener("click", async () => {
     maxRemovalsPerDay: Math.min(200, Math.max(1, parseInt($("setMaxPerDay").value, 10) || 40)),
     removeDelayMinSec: min,
     removeDelayMaxSec: Math.max(min, parseInt($("setDelayMax").value, 10) || 60),
+    undoDelaySec: (() => {
+      const n = parseInt($("setUndoSec").value, 10);
+      return Number.isFinite(n) ? Math.min(300, Math.max(0, n)) : 30;
+    })(),
   });
   renderSettings();
 });
@@ -1421,7 +1428,19 @@ function renderDailyMeter() {
   $("dailyFill").style.width = `${Math.min(100, (100 * today) / cap)}%`;
 }
 
-// The 30-second window between "Remove" and anything reaching Facebook.
+function undoSec() {
+  const n = Number(settings.undoDelaySec);
+  return Number.isFinite(n) ? Math.max(0, n) : 30;
+}
+
+function undoNote() {
+  const sec = undoSec();
+  return sec
+    ? `You'll have ${sec} seconds to undo before anything is sent to Facebook. After that it can't be undone by the extension.`
+    : "Removals start right away (the undo window is turned off in Settings) and can't be undone by the extension.";
+}
+
+// The window between "Remove" and anything reaching Facebook.
 function renderQueuedRemoval(bar) {
   bar.classList.add("queued");
   const left = Math.max(0, Math.ceil(((job.startsAt || Date.now()) - Date.now()) / 1000));
@@ -1437,7 +1456,8 @@ function renderQueuedRemoval(bar) {
   track.className = "jobprogress countdown";
   const fill = document.createElement("span");
   fill.className = "ok";
-  fill.style.width = `${(100 * left) / 30}%`;
+  const windowSec = Math.max(1, ((job.startsAt || 0) - (job.queuedAt || 0)) / 1000);
+  fill.style.width = `${Math.min(100, (100 * left) / windowSec)}%`;
   track.appendChild(fill);
   body.appendChild(track);
   const names = (job.queue || []).map((k) => friends[k] && friends[k].name).filter(Boolean);
@@ -1466,6 +1486,15 @@ function renderQueuedRemoval(bar) {
     await chrome.runtime.sendMessage({ cmd: "cancelJob" });
   });
   actions.appendChild(undo);
+  const now = document.createElement("button");
+  now.textContent = "Run now";
+  now.title = "Skip the rest of the wait and start removing";
+  now.addEventListener("click", async () => {
+    now.disabled = true;
+    undo.disabled = true;
+    await chrome.runtime.sendMessage({ cmd: "runQueuedNow" });
+  });
+  actions.appendChild(now);
   bar.appendChild(actions);
 }
 
@@ -1556,7 +1585,7 @@ function renderReview() {
   $("rvDone").classList.toggle("hidden", !done);
   if (done) {
     $("rvSummary").textContent = removes.length
-      ? `You chose to remove ${removes.length}. Press "Remove ${removes.length}" to start — you'll still have 30 seconds to undo.`
+      ? `You chose to remove ${removes.length}. Press "Remove ${removes.length}" to start${undoSec() ? ` — you'll still have ${undoSec()} seconds to undo` : ""}.`
       : "Nothing marked for removal. Everyone you kept is now protected.";
     return;
   }

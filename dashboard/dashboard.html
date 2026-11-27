@@ -359,11 +359,15 @@
             <label>Delay between removals (seconds, max)
               <input type="number" id="setDelayMax" min="30" max="900" />
             </label>
+            <label>Undo window before removals start (seconds, 0 = off)
+              <input type="number" id="setUndoSec" min="0" max="300" />
+            </label>
             <button id="btnSaveSettings" class="primary">Save</button>
             <p class="note">
               Removals are paced with randomized delays (never faster than ~30s),
-              capped per run and per day, and wait 30 seconds before starting so
-              you can undo. Facebook's terms restrict tools like this one, and going
+              capped per run and per day, and by default wait 30 seconds before
+              starting so you can undo (change that above, or press "Run now" in
+              the banner to skip the wait). Facebook's terms restrict tools like this one, and going
               too fast can get your account temporarily action-blocked. Keep runs
               small (10–20) and spread them across days.
             </p>
