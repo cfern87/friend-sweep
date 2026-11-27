@@ -10,7 +10,7 @@ const SETTINGS_DEFAULTS = {
   maxRemovalsPerRun: 20,
   removeDelayMinSec: 30,
   removeDelayMaxSec: 60,
-  maxRemovalsPerDay: 40,
+  maxRemovalsPerDay: 75,
   // Seconds between pressing Remove and anything reaching Facebook (0 = off).
   undoDelaySec: 30,
   // Protected friends are ones you've already decided to keep, so they're
@@ -778,7 +778,7 @@ function renderJob() {
       const pace = document.createElement("div");
       pace.className = "jobpacing";
       const { today, cap } = dailyUsage();
-      pace.textContent = `Paced ${d.minSec || 30}–${d.maxSec || 60}s apart, like a person would · ${today} of ${cap} removals today`;
+      pace.textContent = `Paced ${d.minSec || 30}–${d.maxSec || 60}s apart, like a person would · ${today} of ${cap} today (daily safety limit)`;
       body.appendChild(pace);
     }
   }
@@ -1033,11 +1033,14 @@ function confirmAndRemove(queue, skipped = 0) {
   const { today, cap: dayCap } = dailyUsage();
   const leftToday = Math.max(0, dayCap - today);
   if (!leftToday) {
-    alert(`You've reached today's limit of ${dayCap} removals. It resets at midnight — spreading removals over days keeps your account safe.`);
+    alert(`You've hit your daily safety limit of ${dayCap} removals. It resets at midnight, and you can change it in Settings → Removal safety.\n\nThis isn't a plan limit: it spaces removals out so Facebook doesn't action-block your account.`);
+    location.hash = "settings";
+    showView("settings");
+    $("setMaxPerDay").focus();
     return false;
   }
   const dayNote = leftToday < Math.min(queue.length, cap)
-    ? `\n\nDaily limit: only ${leftToday} more today, so the rest wait for tomorrow.`
+    ? `\n\nDaily safety limit: only ${leftToday} more today, so the rest wait for tomorrow (you can raise the limit in Settings).`
     : "";
   const allowanceNote =
     !a.isPro && a.removalsRemaining < Math.min(queue.length, cap)
@@ -1155,7 +1158,7 @@ $("btnSaveSettings").addEventListener("click", async () => {
   const min = Math.max(30, parseInt($("setDelayMin").value, 10) || 30);
   await saveSettings({
     maxRemovalsPerRun: Math.max(1, parseInt($("setMaxRemovals").value, 10) || 20),
-    maxRemovalsPerDay: Math.min(200, Math.max(1, parseInt($("setMaxPerDay").value, 10) || 40)),
+    maxRemovalsPerDay: Math.min(200, Math.max(1, parseInt($("setMaxPerDay").value, 10) || SETTINGS_DEFAULTS.maxRemovalsPerDay)),
     removeDelayMinSec: min,
     removeDelayMaxSec: Math.max(min, parseInt($("setDelayMax").value, 10) || 60),
     undoDelaySec: (() => {
@@ -1414,7 +1417,7 @@ function dailyUsage() {
   const today = Object.values(friends).filter(
     (f) => f.removedAt && !f.removedManually && f.removedAt >= midnight.getTime()
   ).length;
-  return { today, cap: settings.maxRemovalsPerDay || 40 };
+  return { today, cap: settings.maxRemovalsPerDay || SETTINGS_DEFAULTS.maxRemovalsPerDay };
 }
 
 function renderDailyMeter() {
@@ -1423,8 +1426,8 @@ function renderDailyMeter() {
   el.classList.toggle("near", today >= cap * 0.75 && today < cap);
   el.classList.toggle("full", today >= cap);
   $("dailyText").textContent = today >= cap
-    ? `Daily limit reached (${cap}) — back tomorrow`
-    : `Today: ${today} of ${cap} removals`;
+    ? `Daily safety limit reached (${cap}) · change in Settings`
+    : `Today: ${today} of ${cap} (daily safety limit)`;
   $("dailyFill").style.width = `${Math.min(100, (100 * today) / cap)}%`;
 }
 

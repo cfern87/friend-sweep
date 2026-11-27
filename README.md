@@ -5,7 +5,9 @@
 > site's `/extension-auth` page via `externally_connectable`), checks the plan at
 > `/api/public/entitlement`, and reports completed removals to `/api/public/removals`.
 > Free: 40 removals per calendar month (UTC), 1-month engagement look-back. Pro: unlimited
-> removals, 1-year look-back, scheduled scans, CSV export. Friend data still never leaves the
+> removals, 1-year look-back, scheduled scans, CSV export. Every plan also has a **daily safety
+> limit** (default 75 a day, adjustable 1–200 in Settings) that spreads removals over days so
+> Facebook doesn't action-block the account; it isn't a plan limit. Friend data still never leaves the
 > browser. When the site moves to a new domain, update `PLATFORM_URL`/`PLATFORM_ORIGINS` in
 > `license.js` and `externally_connectable` in `manifest.json` together.
 

@@ -125,7 +125,8 @@ input[type="text"], input[type="url"], input[type="number"], input[type="search"
   display: flex; justify-content: space-between; align-items: center;
   flex-wrap: wrap; gap: 10px; padding: 6px 24px;
 }
-.dailymeter { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.dailymeter { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); text-decoration: none; }
+a.dailymeter:hover #dailyText { text-decoration: underline; }
 .dailymeter .meter { width: 120px; height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .dailymeter .meter span { display: block; height: 100%; background: var(--brand); transition: width 0.3s; }
 .dailymeter.near .meter span { background: var(--warning); }

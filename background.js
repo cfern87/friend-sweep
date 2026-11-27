@@ -475,7 +475,7 @@ function undoMsFrom(settings) {
   return Math.round(Math.min(MAX_UNDO_SEC, Math.max(0, sec))) * 1000;
 }
 const ALARM_REMOVAL_START = "removal-start";
-const DEFAULT_DAILY_CAP = 40;
+const DEFAULT_DAILY_CAP = 75;
 
 // Removals the extension made today (local time) — the number the daily cap
 // and the dashboard's meter count. Hand-marked removals aren't ours.
@@ -501,12 +501,12 @@ async function startRemoval(friendKeys) {
   if (!leftToday) {
     return {
       ok: false,
-      error: `You've reached today's limit of ${dailyCap} removals. It resets at midnight — spreading removals over days keeps your account safe.`,
+      error: `You've hit your daily safety limit of ${dailyCap} removals. It resets at midnight, and you can change it in Settings. This isn't a plan limit: it spaces removals out so Facebook doesn't action-block your account.`,
     };
   }
   const warnings = [];
   if (queue.length > leftToday) {
-    warnings.push(`Daily limit: ${queue.length - leftToday} of your selection were held back for tomorrow (limit ${dailyCap} a day).`);
+    warnings.push(`Daily safety limit: ${queue.length - leftToday} of your selection were held back for tomorrow (${dailyCap} a day, changeable in Settings).`);
     queue = queue.slice(0, leftToday);
   }
 

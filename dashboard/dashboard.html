@@ -107,10 +107,10 @@
             <button id="btnToCrm" class="ghost" disabled title="Download the selection as a contacts file for Not Another Social CRM, tagged so you can reconnect instead of removing">Send to CRM (0)</button>
             <button id="btnExport" class="ghost">Export CSV</button>
           </div>
-          <div class="dailymeter" id="dailyMeter" title="Removals today against your daily limit (Settings). Spreading removals over days keeps your account safe.">
+          <a href="#settings" class="dailymeter" id="dailyMeter" title="Removals today against your daily safety limit. This isn't a plan limit: it spreads removals over days so Facebook doesn't action-block your account. Click to change it.">
             <span id="dailyText"></span>
             <span class="meter"><span id="dailyFill"></span></span>
-          </div>
+          </a>
         </section>
 
         <section class="filters">
@@ -350,8 +350,8 @@
             <label>Max removals per run
               <input type="number" id="setMaxRemovals" min="1" max="100" />
             </label>
-            <label>Max removals per day
-              <input type="number" id="setMaxPerDay" min="1" max="200" />
+            <label>Daily safety limit (removals per day, 1–200)
+              <input type="number" id="setMaxPerDay" min="1" max="200" title="Applies on every plan, including Pro. It isn't a plan limit: it spreads removals over days so Facebook doesn't action-block your account. Default 75." />
             </label>
             <label>Delay between removals (seconds, min)
               <input type="number" id="setDelayMin" min="30" max="600" />
@@ -365,7 +365,8 @@
             <button id="btnSaveSettings" class="primary">Save</button>
             <p class="note">
               Removals are paced with randomized delays (never faster than ~30s),
-              capped per run and per day, and by default wait 30 seconds before
+              capped per run and by the daily safety limit (on every plan: Pro's
+              "unlimited" means no monthly allowance, not no pacing), and by default wait 30 seconds before
               starting so you can undo (change that above, or press "Run now" in
               the banner to skip the wait). Facebook's terms restrict tools like this one, and going
               too fast can get your account temporarily action-blocked. Keep runs
